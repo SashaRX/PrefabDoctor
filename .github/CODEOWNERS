@@ -1,0 +1,14 @@
+# Override Doctor — Code Owners
+
+# Package manifest & config
+package.json        @SashaRX
+CHANGELOG.md        @SashaRX
+CLAUDE.md           @SashaRX
+AGENTS.md           @SashaRX
+REVIEW.md           @SashaRX
+
+# Editor tools (core logic)
+Editor/             @SashaRX
+
+# CI/CD
+.github/            @SashaRX

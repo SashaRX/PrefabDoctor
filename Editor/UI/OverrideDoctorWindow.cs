@@ -1,0 +1,672 @@
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using UnityEditor;
+using UnityEditor.IMGUI.Controls;
+using UnityEngine;
+
+namespace SashaRX.OverrideDoctor
+{
+    public class OverrideDoctorWindow : EditorWindow
+    {
+        [MenuItem("Tools/Override Doctor %&o")]
+        private static void Open() => GetWindow<OverrideDoctorWindow>("Override Doctor");
+
+        // ── State ──────────────────────────────────────────────────
+        private int _activeTab; // 0 = Instance Analysis, 1 = Project Scan
+        private static readonly string[] s_TabNames = { "Instance Analysis", "Project Scan" };
+
+        private GameObject _target;
+        private AnalysisReport _report;
+        private OverrideAnalyzer _analyzer = new();
+
+        // Incremental analysis
+        private IEnumerator<float> _incrementalJob;
+        private AnalysisReport _pendingReport;
+        private float _progress;
+        private bool _useIncremental = true;
+
+        // Project scan (separate panel)
+        private ProjectScanPanel _scanPanel = new();
+
+        // Filter toggles
+        private bool _showDefaults;
+        private bool _showSceneOverrides;
+        private bool _showInternalProps;
+        private FilterMode _filterMode = FilterMode.ConflictsOnly;
+
+        // UI state
+        private Vector2 _leftScroll;
+        private Vector2 _rightScroll;
+        private int _selectedGoIndex = -1;
+        private float _splitRatio = 0.3f;
+        private bool _isDraggingSplit;
+
+        // Selection for batch ops
+        private HashSet<int> _selectedConflicts = new();
+
+        private enum FilterMode
+        {
+            ConflictsOnly,
+            AllOverrides,
+            PingPongOnly,
+            OrphansOnly,
+            InsignificantOnly
+        }
+
+        // ── Main Layout ────────────────────────────────────────────
+
+        private void OnGUI()
+        {
+            // Tab bar
+            _activeTab = GUILayout.Toolbar(_activeTab, s_TabNames, GUILayout.Height(22));
+
+            if (_activeTab == 1)
+            {
+                _scanPanel.OnGUI();
+                return;
+            }
+
+            // Instance Analysis tab
+            DrawToolbar();
+            DrawStatusBar();
+
+            if (_report == null || _report.GameObjects.Count == 0)
+            {
+                DrawEmptyState();
+                return;
+            }
+
+            // Split view
+            var rect = GUILayoutUtility.GetRect(0, 0, GUILayout.ExpandWidth(true),
+                GUILayout.ExpandHeight(true));
+            float splitX = rect.x + rect.width * _splitRatio;
+
+            // Handle split drag
+            var splitHandle = new Rect(splitX - 2, rect.y, 4, rect.height);
+            EditorGUIUtility.AddCursorRect(splitHandle, MouseCursor.ResizeHorizontal);
+
+            if (Event.current.type == EventType.MouseDown && splitHandle.Contains(Event.current.mousePosition))
+            {
+                _isDraggingSplit = true;
+                Event.current.Use();
+            }
+            if (_isDraggingSplit)
+            {
+                if (Event.current.type == EventType.MouseDrag)
+                {
+                    _splitRatio = Mathf.Clamp((Event.current.mousePosition.x - rect.x) / rect.width,
+                        0.15f, 0.6f);
+                    Repaint();
+                    Event.current.Use();
+                }
+                if (Event.current.type == EventType.MouseUp)
+                    _isDraggingSplit = false;
+            }
+
+            var leftRect = new Rect(rect.x, rect.y, splitX - rect.x, rect.height);
+            var rightRect = new Rect(splitX + 2, rect.y, rect.xMax - splitX - 2, rect.height);
+
+            DrawGameObjectTree(leftRect);
+            DrawConflictTable(rightRect);
+        }
+
+        // ── Toolbar ────────────────────────────────────────────────
+
+        private void DrawToolbar()
+        {
+            EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
+
+            // Target field
+            var newTarget = (GameObject)EditorGUILayout.ObjectField(
+                _target, typeof(GameObject), true, GUILayout.Width(200));
+            if (newTarget != _target)
+            {
+                _target = newTarget;
+                _report = null;
+            }
+
+            // Use selection
+            if (GUILayout.Button("← Selection", EditorStyles.toolbarButton, GUILayout.Width(80)))
+            {
+                if (Selection.activeGameObject != null)
+                {
+                    _target = Selection.activeGameObject;
+                    _report = null;
+                }
+            }
+
+            GUILayout.Space(8);
+
+            // Analyze button
+            GUI.backgroundColor = _target != null ? new Color(0.4f, 0.8f, 0.4f) : Color.gray;
+            if (GUILayout.Button("Analyze", EditorStyles.toolbarButton, GUILayout.Width(70)))
+            {
+                RunAnalysis();
+            }
+            GUI.backgroundColor = Color.white;
+
+            GUILayout.Space(8);
+
+            // Filter mode
+            _filterMode = (FilterMode)EditorGUILayout.EnumPopup(_filterMode,
+                EditorStyles.toolbarDropDown, GUILayout.Width(130));
+
+            GUILayout.FlexibleSpace();
+
+            // Toggles
+            _showDefaults = GUILayout.Toggle(_showDefaults, "Defaults",
+                EditorStyles.toolbarButton, GUILayout.Width(60));
+            _showSceneOverrides = GUILayout.Toggle(_showSceneOverrides, "Scene",
+                EditorStyles.toolbarButton, GUILayout.Width(50));
+            _showInternalProps = GUILayout.Toggle(_showInternalProps, "Internal",
+                EditorStyles.toolbarButton, GUILayout.Width(55));
+
+            GUILayout.Space(4);
+
+            // Batch actions
+            if (_report != null)
+            {
+                if (GUILayout.Button("Clean Orphans", EditorStyles.toolbarButton, GUILayout.Width(90)))
+                {
+                    int removed = OverrideActions.CleanOrphans(_target);
+                    Debug.Log($"[Override Doctor] Cleaned {removed} orphaned overrides");
+                    RunAnalysis();
+                }
+
+                if (GUILayout.Button("Clean Insignificant", EditorStyles.toolbarButton, GUILayout.Width(110)))
+                {
+                    int removed = OverrideActions.CleanInsignificant(_target, _report.Chain);
+                    Debug.Log($"[Override Doctor] Cleaned {removed} insignificant overrides");
+                    RunAnalysis();
+                }
+            }
+
+            EditorGUILayout.EndHorizontal();
+        }
+
+        // ── Status Bar ─────────────────────────────────────────────
+
+        private void DrawStatusBar()
+        {
+            if (_report == null) return;
+
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+
+            var chainNames = string.Join(" → ",
+                _report.Chain.Select(l => l.IsSceneInstance ? "[Scene]" :
+                    System.IO.Path.GetFileNameWithoutExtension(l.AssetPath)));
+            GUILayout.Label($"Chain: {chainNames}", EditorStyles.miniLabel);
+
+            GUILayout.FlexibleSpace();
+
+            DrawBadge($"Ping-Pong: {_report.TotalPingPong}", Color.red, _report.TotalPingPong > 0);
+            DrawBadge($"Multi: {_report.TotalMultiOverride}", new Color(1f, 0.7f, 0f),
+                _report.TotalMultiOverride > 0);
+            DrawBadge($"Orphan: {_report.TotalOrphan}", new Color(0.6f, 0.6f, 0.6f),
+                _report.TotalOrphan > 0);
+            DrawBadge($"Insignificant: {_report.TotalInsignificant}", new Color(0.5f, 0.8f, 1f),
+                _report.TotalInsignificant > 0);
+
+            GUILayout.Label($"  {_report.AnalysisTimeMs:F0}ms", EditorStyles.miniLabel);
+
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawBadge(string text, Color color, bool active)
+        {
+            var prevColor = GUI.contentColor;
+            GUI.contentColor = active ? color : new Color(0.5f, 0.5f, 0.5f);
+            GUILayout.Label(text, EditorStyles.miniBoldLabel, GUILayout.ExpandWidth(false));
+            GUI.contentColor = prevColor;
+        }
+
+        // ── Left Panel: GameObject Tree ────────────────────────────
+
+        private void DrawGameObjectTree(Rect rect)
+        {
+            GUILayout.BeginArea(rect);
+            _leftScroll = EditorGUILayout.BeginScrollView(_leftScroll);
+
+            var filteredGOs = GetFilteredGameObjects();
+
+            for (int i = 0; i < filteredGOs.Count; i++)
+            {
+                var goReport = filteredGOs[i];
+                bool selected = _selectedGoIndex == i;
+
+                EditorGUILayout.BeginHorizontal(selected
+                    ? "SelectionRect"
+                    : GUIStyle.none);
+
+                // Severity icon
+                if (goReport.PingPongCount > 0)
+                    DrawColorDot(Color.red);
+                else if (goReport.MultiOverrideCount > 0)
+                    DrawColorDot(new Color(1f, 0.7f, 0f));
+                else if (goReport.OrphanCount > 0)
+                    DrawColorDot(new Color(0.6f, 0.6f, 0.6f));
+                else
+                    DrawColorDot(new Color(0.5f, 0.8f, 1f));
+
+                // Name (with indent based on path depth)
+                int indent = goReport.RelativePath.Count(c => c == '/');
+                string displayName = goReport.RelativePath.Contains('/')
+                    ? goReport.RelativePath[(goReport.RelativePath.LastIndexOf('/') + 1)..]
+                    : goReport.RelativePath;
+
+                GUILayout.Space(indent * 12);
+
+                if (GUILayout.Button(displayName, EditorStyles.label))
+                {
+                    _selectedGoIndex = i;
+                    _selectedConflicts.Clear();
+                }
+
+                GUILayout.FlexibleSpace();
+
+                // Counts
+                string counts = "";
+                if (goReport.PingPongCount > 0) counts += $"P:{goReport.PingPongCount} ";
+                if (goReport.MultiOverrideCount > 0) counts += $"M:{goReport.MultiOverrideCount} ";
+                if (goReport.OrphanCount > 0) counts += $"O:{goReport.OrphanCount} ";
+                GUILayout.Label(counts, EditorStyles.miniLabel);
+
+                EditorGUILayout.EndHorizontal();
+            }
+
+            EditorGUILayout.EndScrollView();
+            GUILayout.EndArea();
+        }
+
+        private void DrawColorDot(Color color)
+        {
+            var dotRect = GUILayoutUtility.GetRect(10, 10, GUILayout.Width(10), GUILayout.Height(16));
+            dotRect.y += 3;
+            dotRect.height = 10;
+            var prev = GUI.color;
+            GUI.color = color;
+            GUI.DrawTexture(dotRect, EditorGUIUtility.whiteTexture, ScaleMode.ScaleToFit);
+            GUI.color = prev;
+        }
+
+        // ── Right Panel: Conflict Table ────────────────────────────
+
+        private void DrawConflictTable(Rect rect)
+        {
+            GUILayout.BeginArea(rect);
+
+            var filteredGOs = GetFilteredGameObjects();
+            if (_selectedGoIndex < 0 || _selectedGoIndex >= filteredGOs.Count)
+            {
+                EditorGUILayout.HelpBox("Select a GameObject on the left to view overrides.",
+                    MessageType.Info);
+                GUILayout.EndArea();
+                return;
+            }
+
+            var goReport = filteredGOs[_selectedGoIndex];
+
+            // Header: full path + ping to Hierarchy
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(goReport.RelativePath, EditorStyles.boldLabel);
+            if (goReport.Instance != null &&
+                GUILayout.Button("Ping", EditorStyles.miniButton, GUILayout.Width(40)))
+            {
+                EditorGUIUtility.PingObject(goReport.Instance);
+                Selection.activeGameObject = goReport.Instance;
+            }
+            EditorGUILayout.EndHorizontal();
+
+            // Batch action bar
+            if (_selectedConflicts.Count > 0)
+            {
+                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+                GUILayout.Label($"{_selectedConflicts.Count} selected", EditorStyles.miniLabel);
+                if (GUILayout.Button("Revert Selected", EditorStyles.miniButton, GUILayout.Width(100)))
+                {
+                    var toRevert = _selectedConflicts
+                        .Select(idx => goReport.Conflicts[idx])
+                        .ToList();
+                    OverrideActions.BatchRevert(_target, toRevert);
+                    RunAnalysis();
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+
+            // Column headers
+            EditorGUILayout.BeginHorizontal("box");
+            GUILayout.Toggle(false, "", GUILayout.Width(16));
+            GUILayout.Label("Severity", EditorStyles.miniBoldLabel, GUILayout.Width(50));
+            GUILayout.Label("Component", EditorStyles.miniBoldLabel, GUILayout.Width(100));
+            GUILayout.Label("Property", EditorStyles.miniBoldLabel, GUILayout.Width(160));
+
+            // One column per nesting level
+            foreach (var level in _report.Chain)
+            {
+                string name = level.IsSceneInstance ? "Scene" :
+                    System.IO.Path.GetFileNameWithoutExtension(level.AssetPath);
+                GUILayout.Label($"D{level.Depth}: {name}", EditorStyles.miniBoldLabel,
+                    GUILayout.Width(100));
+            }
+
+            EditorGUILayout.EndHorizontal();
+
+            // Rows
+            _rightScroll = EditorGUILayout.BeginScrollView(_rightScroll);
+
+            for (int i = 0; i < goReport.Conflicts.Count; i++)
+            {
+                var conflict = goReport.Conflicts[i];
+
+                // Apply filter mode
+                if (!PassesFilter(conflict)) continue;
+
+                Color rowColor = conflict.Severity switch
+                {
+                    ConflictSeverity.PingPong => new Color(1f, 0.3f, 0.3f, 0.15f),
+                    ConflictSeverity.MultiOverride => new Color(1f, 0.7f, 0f, 0.1f),
+                    ConflictSeverity.Orphan => new Color(0.5f, 0.5f, 0.5f, 0.1f),
+                    ConflictSeverity.Insignificant => new Color(0.5f, 0.8f, 1f, 0.08f),
+                    _ => Color.clear
+                };
+
+                var rowRect = EditorGUILayout.BeginHorizontal();
+                EditorGUI.DrawRect(rowRect, rowColor);
+
+                // Checkbox
+                bool wasSelected = _selectedConflicts.Contains(i);
+                bool isSelected = GUILayout.Toggle(wasSelected, "", GUILayout.Width(16));
+                if (isSelected != wasSelected)
+                {
+                    if (isSelected) _selectedConflicts.Add(i);
+                    else _selectedConflicts.Remove(i);
+                }
+
+                // Severity badge
+                string sevLabel = conflict.Severity switch
+                {
+                    ConflictSeverity.PingPong => "PP",
+                    ConflictSeverity.MultiOverride => "M",
+                    ConflictSeverity.Orphan => "O",
+                    ConflictSeverity.Insignificant => "~",
+                    _ => "?"
+                };
+                GUILayout.Label(sevLabel, EditorStyles.miniBoldLabel, GUILayout.Width(50));
+
+                // Component & Property
+                GUILayout.Label(conflict.Key.ComponentType, EditorStyles.miniLabel,
+                    GUILayout.Width(100));
+                GUILayout.Label(conflict.Key.PropertyPath, EditorStyles.miniLabel,
+                    GUILayout.Width(160));
+
+                // Values per depth
+                var overrideByDepth = conflict.Overrides.ToDictionary(o => o.Depth);
+                foreach (var level in _report.Chain)
+                {
+                    if (overrideByDepth.TryGetValue(level.Depth, out var entry))
+                    {
+                        string display = TruncateValue(entry.Value, 14);
+                        GUILayout.Label(display, EditorStyles.miniLabel, GUILayout.Width(100));
+                    }
+                    else
+                    {
+                        GUILayout.Label("—", EditorStyles.miniLabel, GUILayout.Width(100));
+                    }
+                }
+
+                EditorGUILayout.EndHorizontal();
+
+                // Context menu on right-click
+                if (Event.current.type == EventType.ContextClick &&
+                    rowRect.Contains(Event.current.mousePosition))
+                {
+                    ShowConflictContextMenu(conflict, i, goReport);
+                    Event.current.Use();
+                }
+            }
+
+            EditorGUILayout.EndScrollView();
+            GUILayout.EndArea();
+        }
+
+        // ── Context Menu ───────────────────────────────────────────
+
+        private void ShowConflictContextMenu(PropertyConflict conflict, int index,
+            GameObjectReport goReport)
+        {
+            var menu = new GenericMenu();
+
+            menu.AddItem(new GUIContent("Revert All (return to base)"), false, () =>
+            {
+                OverrideActions.RevertAll(_target, conflict);
+                RunAnalysis();
+            });
+
+            menu.AddSeparator("");
+
+            // "Keep only at depth N" for each depth that has an override
+            foreach (var entry in conflict.Overrides)
+            {
+                var level = _report.Chain.FirstOrDefault(l => l.Depth == entry.Depth);
+                string name = level.IsSceneInstance ? "Scene" :
+                    System.IO.Path.GetFileNameWithoutExtension(level.AssetPath);
+                int capturedDepth = entry.Depth;
+                string capturedValue = TruncateValue(entry.Value, 20);
+
+                menu.AddItem(
+                    new GUIContent($"Keep only at D{capturedDepth} ({name}) = {capturedValue}"),
+                    false, () =>
+                    {
+                        OverrideActions.KeepOnlyAtDepth(_target, conflict, capturedDepth);
+                        RunAnalysis();
+                    });
+            }
+
+            menu.AddSeparator("");
+
+            // Select/deselect
+            if (_selectedConflicts.Contains(index))
+                menu.AddItem(new GUIContent("Deselect"), false, () => _selectedConflicts.Remove(index));
+            else
+                menu.AddItem(new GUIContent("Select"), false, () => _selectedConflicts.Add(index));
+
+            // Copy info
+            menu.AddItem(new GUIContent("Copy property path"), false, () =>
+            {
+                EditorGUIUtility.systemCopyBuffer = conflict.Key.PropertyPath;
+            });
+
+            menu.ShowAsContext();
+        }
+
+        // ── Helpers ────────────────────────────────────────────────
+
+        /// <summary>
+        /// Public entry point for context menu / external code.
+        /// </summary>
+        public void SetTargetAndAnalyze(GameObject target, Transform subtreeRoot = null)
+        {
+            _target = target;
+            _subtreeRoot = subtreeRoot;
+            _report = null;
+            RunAnalysis();
+        }
+
+        private Transform _subtreeRoot;
+
+        private void RunAnalysis()
+        {
+            if (_target == null) return;
+
+            // Stop any running incremental job
+            _incrementalJob = null;
+            _pendingReport = null;
+
+            _analyzer.IncludeDefaultOverrides = _showDefaults;
+            _analyzer.IncludeSceneOverrides = _showSceneOverrides;
+            _analyzer.IncludeInternalProperties = _showInternalProps;
+
+            if (_useIncremental)
+            {
+                _pendingReport = new AnalysisReport();
+                _incrementalJob = _analyzer.AnalyzeIncremental(_target, _pendingReport, 300);
+                // Note: incremental doesn't support subtree yet — full scan
+                _progress = 0f;
+                EditorApplication.update += PumpIncrementalJob;
+            }
+            else
+            {
+                _report = _analyzer.Analyze(_target, _subtreeRoot);
+                _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
+                _selectedConflicts.Clear();
+            }
+
+            Repaint();
+        }
+
+        private void PumpIncrementalJob()
+        {
+            if (_incrementalJob == null)
+            {
+                EditorApplication.update -= PumpIncrementalJob;
+                return;
+            }
+
+            // Process several steps per editor frame
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 16) // ~1 frame budget
+            {
+                if (!_incrementalJob.MoveNext())
+                {
+                    // Done
+                    _report = _pendingReport;
+                    _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
+                    _selectedConflicts.Clear();
+                    _incrementalJob = null;
+                    _pendingReport = null;
+                    EditorApplication.update -= PumpIncrementalJob;
+                    Repaint();
+                    return;
+                }
+                _progress = _incrementalJob.Current;
+            }
+            Repaint();
+        }
+
+        private void OnEnable()
+        {
+            if (_target == null && Selection.activeGameObject != null &&
+                PrefabUtility.IsPartOfPrefabInstance(Selection.activeGameObject))
+            {
+                _target = PrefabUtility.GetOutermostPrefabInstanceRoot(Selection.activeGameObject);
+            }
+
+            // Persistent update for scan panel pump
+            EditorApplication.update += PumpScanJob;
+        }
+
+        private void OnDisable()
+        {
+            EditorApplication.update -= PumpIncrementalJob;
+            EditorApplication.update -= PumpScanJob;
+            _incrementalJob = null;
+            _scanPanel.OnDisable();
+        }
+
+        private void PumpScanJob()
+        {
+            if (!_scanPanel.IsScanning) return;
+            _scanPanel.PumpScanJob();
+            Repaint();
+        }
+
+        private List<GameObjectReport> GetFilteredGameObjects()
+        {
+            if (_report == null) return new List<GameObjectReport>();
+
+            return _filterMode switch
+            {
+                FilterMode.PingPongOnly => _report.GameObjects
+                    .Where(g => g.PingPongCount > 0).ToList(),
+                FilterMode.OrphansOnly => _report.GameObjects
+                    .Where(g => g.OrphanCount > 0).ToList(),
+                FilterMode.InsignificantOnly => _report.GameObjects
+                    .Where(g => g.InsignificantCount > 0).ToList(),
+                FilterMode.ConflictsOnly => _report.GameObjects
+                    .Where(g => g.PingPongCount > 0 || g.MultiOverrideCount > 0 ||
+                               g.OrphanCount > 0).ToList(),
+                _ => _report.GameObjects
+            };
+        }
+
+        private bool PassesFilter(PropertyConflict conflict)
+        {
+            return _filterMode switch
+            {
+                FilterMode.PingPongOnly => conflict.Severity == ConflictSeverity.PingPong,
+                FilterMode.OrphansOnly => conflict.Severity == ConflictSeverity.Orphan,
+                FilterMode.InsignificantOnly => conflict.Severity == ConflictSeverity.Insignificant,
+                FilterMode.ConflictsOnly => conflict.Severity != ConflictSeverity.Insignificant,
+                _ => true
+            };
+        }
+
+        private static string TruncateValue(string value, int maxLen)
+        {
+            if (string.IsNullOrEmpty(value)) return "null";
+            if (value.Length <= maxLen) return value;
+            return value[..(maxLen - 1)] + "…";
+        }
+
+        // ── Selection tracking ─────────────────────────────────────
+
+        private void OnSelectionChange()
+        {
+            if (Selection.activeGameObject != null &&
+                PrefabUtility.IsPartOfPrefabInstance(Selection.activeGameObject))
+            {
+                if (_target == null)
+                {
+                    _target = PrefabUtility.GetOutermostPrefabInstanceRoot(
+                        Selection.activeGameObject);
+                    Repaint();
+                }
+            }
+        }
+
+        private void DrawEmptyState()
+        {
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+
+            if (_incrementalJob != null)
+            {
+                // Progress bar during incremental analysis
+                EditorGUILayout.BeginVertical(GUILayout.Width(300));
+                EditorGUILayout.LabelField("Analyzing...", EditorStyles.centeredGreyMiniLabel);
+                var rect = GUILayoutUtility.GetRect(300, 20);
+                EditorGUI.ProgressBar(rect, _progress, $"{(_progress * 100):F0}%");
+                EditorGUILayout.EndVertical();
+            }
+            else if (_target == null)
+            {
+                EditorGUILayout.LabelField(
+                    "Select a prefab instance and click Analyze\nor drag it into the target field.",
+                    EditorStyles.centeredGreyMiniLabel, GUILayout.Width(300));
+            }
+            else if (_report != null && _report.GameObjects.Count == 0)
+            {
+                EditorGUILayout.LabelField(
+                    "No conflicts found.\n" +
+                    (_report.IsComplete ? "Prefab is clean." : "Analysis incomplete."),
+                    EditorStyles.centeredGreyMiniLabel, GUILayout.Width(300));
+            }
+
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.EndHorizontal();
+            GUILayout.FlexibleSpace();
+        }
+    }
+}

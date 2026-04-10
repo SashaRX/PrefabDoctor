@@ -1,0 +1,23 @@
+{
+  "name": "com.sasharx.override-doctor",
+  "version": "0.1.0",
+  "displayName": "Override Doctor",
+  "description": "Detects and resolves override conflicts in deeply nested Unity prefabs. Finds ping-pong patterns, insignificant overrides, orphaned modifications.",
+  "unity": "2021.3",
+  "author": {
+    "name": "SashaRX",
+    "url": "https://github.com/SashaRX"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SashaRX/OverrideDoctor.git"
+  },
+  "keywords": [
+    "prefab",
+    "override",
+    "nested-prefab",
+    "editor-tool"
+  ],
+  "license": "MIT",
+  "type": "tool"
+}
