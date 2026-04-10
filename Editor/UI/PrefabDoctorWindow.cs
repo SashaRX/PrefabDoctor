@@ -78,9 +78,10 @@ namespace SashaRX.PrefabDoctor
                 return;
             }
 
-            // Split view
-            var rect = GUILayoutUtility.GetRect(0, 0, GUILayout.ExpandWidth(true),
-                GUILayout.ExpandHeight(true));
+            // Split view — use remaining space
+            EditorGUILayout.BeginVertical(GUILayout.ExpandHeight(true));
+            var rect = GUILayoutUtility.GetRect(10, 10,
+                GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
             float splitX = rect.x + rect.width * _splitRatio;
 
             // Handle split drag
@@ -110,6 +111,7 @@ namespace SashaRX.PrefabDoctor
 
             DrawGameObjectTree(leftRect);
             DrawConflictTable(rightRect);
+            EditorGUILayout.EndVertical();
         }
 
         // ── Toolbar ────────────────────────────────────────────────

@@ -32,3 +32,4 @@ Thumbs.db
 # Temp
 .commitmsg
 commitmsg.txt
+.github/workflows/
