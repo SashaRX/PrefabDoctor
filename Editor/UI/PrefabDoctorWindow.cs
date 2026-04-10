@@ -78,38 +78,24 @@ namespace SashaRX.PrefabDoctor
                 return;
             }
 
-            // Split view — get remaining space
-            var rect = EditorGUILayout.GetControlRect(false, position.height - GUILayoutUtility.GetLastRect().yMax - 4);
-            if (rect.height < 10) return; // layout not ready yet
-            float splitX = rect.x + rect.width * _splitRatio;
+            // Simple horizontal split — no manual rect math
+            float leftWidth = position.width * _splitRatio;
 
-            // Handle split drag
-            var splitHandle = new Rect(splitX - 2, rect.y, 4, rect.height);
-            EditorGUIUtility.AddCursorRect(splitHandle, MouseCursor.ResizeHorizontal);
+            EditorGUILayout.BeginHorizontal();
 
-            if (Event.current.type == EventType.MouseDown && splitHandle.Contains(Event.current.mousePosition))
-            {
-                _isDraggingSplit = true;
-                Event.current.Use();
-            }
-            if (_isDraggingSplit)
-            {
-                if (Event.current.type == EventType.MouseDrag)
-                {
-                    _splitRatio = Mathf.Clamp((Event.current.mousePosition.x - rect.x) / rect.width,
-                        0.15f, 0.6f);
-                    Repaint();
-                    Event.current.Use();
-                }
-                if (Event.current.type == EventType.MouseUp)
-                    _isDraggingSplit = false;
-            }
+            // Left panel: GameObject tree
+            _leftScroll = EditorGUILayout.BeginScrollView(_leftScroll,
+                GUILayout.Width(leftWidth), GUILayout.ExpandHeight(true));
+            DrawGameObjectList();
+            EditorGUILayout.EndScrollView();
 
-            var leftRect = new Rect(rect.x, rect.y, splitX - rect.x, rect.height);
-            var rightRect = new Rect(splitX + 2, rect.y, rect.xMax - splitX - 2, rect.height);
+            // Right panel: Conflict table
+            _rightScroll = EditorGUILayout.BeginScrollView(_rightScroll,
+                GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+            DrawConflictList();
+            EditorGUILayout.EndScrollView();
 
-            DrawGameObjectTree(leftRect);
-            DrawConflictTable(rightRect);
+            EditorGUILayout.EndHorizontal();
         }
 
         // ── Toolbar ────────────────────────────────────────────────
@@ -224,11 +210,8 @@ namespace SashaRX.PrefabDoctor
 
         // ── Left Panel: GameObject Tree ────────────────────────────
 
-        private void DrawGameObjectTree(Rect rect)
+        private void DrawGameObjectList()
         {
-            GUILayout.BeginArea(rect);
-            _leftScroll = EditorGUILayout.BeginScrollView(_leftScroll);
-
             var filteredGOs = GetFilteredGameObjects();
 
             for (int i = 0; i < filteredGOs.Count; i++)
@@ -250,13 +233,9 @@ namespace SashaRX.PrefabDoctor
                 else
                     DrawColorDot(new Color(0.5f, 0.8f, 1f));
 
-                // Name (with indent based on path depth)
-                int indent = goReport.RelativePath.Count(c => c == '/');
                 string displayName = goReport.RelativePath.Contains('/')
                     ? goReport.RelativePath[(goReport.RelativePath.LastIndexOf('/') + 1)..]
                     : goReport.RelativePath;
-
-                GUILayout.Space(indent * 12);
 
                 if (GUILayout.Button(displayName, EditorStyles.label))
                 {
@@ -266,7 +245,6 @@ namespace SashaRX.PrefabDoctor
 
                 GUILayout.FlexibleSpace();
 
-                // Counts
                 string counts = "";
                 if (goReport.PingPongCount > 0) counts += $"P:{goReport.PingPongCount} ";
                 if (goReport.MultiOverrideCount > 0) counts += $"M:{goReport.MultiOverrideCount} ";
@@ -275,9 +253,6 @@ namespace SashaRX.PrefabDoctor
 
                 EditorGUILayout.EndHorizontal();
             }
-
-            EditorGUILayout.EndScrollView();
-            GUILayout.EndArea();
         }
 
         private void DrawColorDot(Color color)
@@ -293,22 +268,19 @@ namespace SashaRX.PrefabDoctor
 
         // ── Right Panel: Conflict Table ────────────────────────────
 
-        private void DrawConflictTable(Rect rect)
+        private void DrawConflictList()
         {
-            GUILayout.BeginArea(rect);
-
             var filteredGOs = GetFilteredGameObjects();
             if (_selectedGoIndex < 0 || _selectedGoIndex >= filteredGOs.Count)
             {
                 EditorGUILayout.HelpBox("Select a GameObject on the left to view overrides.",
                     MessageType.Info);
-                GUILayout.EndArea();
                 return;
             }
 
             var goReport = filteredGOs[_selectedGoIndex];
 
-            // Header: full path + ping to Hierarchy
+            // Header
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField(goReport.RelativePath, EditorStyles.boldLabel);
             if (goReport.Instance != null &&
@@ -337,25 +309,13 @@ namespace SashaRX.PrefabDoctor
 
             // Column headers
             EditorGUILayout.BeginHorizontal("box");
-            GUILayout.Toggle(false, "", GUILayout.Width(16));
-            GUILayout.Label("Severity", EditorStyles.miniBoldLabel, GUILayout.Width(50));
+            GUILayout.Label("Sev", EditorStyles.miniBoldLabel, GUILayout.Width(30));
             GUILayout.Label("Component", EditorStyles.miniBoldLabel, GUILayout.Width(100));
             GUILayout.Label("Property", EditorStyles.miniBoldLabel, GUILayout.Width(160));
-
-            // One column per nesting level
-            foreach (var level in _report.Chain)
-            {
-                string name = level.IsSceneInstance ? "Scene" :
-                    System.IO.Path.GetFileNameWithoutExtension(level.AssetPath);
-                GUILayout.Label($"D{level.Depth}: {name}", EditorStyles.miniBoldLabel,
-                    GUILayout.Width(100));
-            }
-
+            GUILayout.Label("Values by depth", EditorStyles.miniBoldLabel);
             EditorGUILayout.EndHorizontal();
 
             // Rows
-            _rightScroll = EditorGUILayout.BeginScrollView(_rightScroll);
-
             for (int i = 0; i < goReport.Conflicts.Count; i++)
             {
                 var conflict = goReport.Conflicts[i];
@@ -393,7 +353,7 @@ namespace SashaRX.PrefabDoctor
                     ConflictSeverity.Insignificant => "~",
                     _ => "?"
                 };
-                GUILayout.Label(sevLabel, EditorStyles.miniBoldLabel, GUILayout.Width(50));
+                GUILayout.Label(sevLabel, EditorStyles.miniBoldLabel, GUILayout.Width(30));
 
                 // Component & Property
                 GUILayout.Label(conflict.Key.ComponentType, EditorStyles.miniLabel,
@@ -401,25 +361,14 @@ namespace SashaRX.PrefabDoctor
                 GUILayout.Label(conflict.Key.PropertyPath, EditorStyles.miniLabel,
                     GUILayout.Width(160));
 
-                // Values per depth (may have duplicates on same depth — take first)
-                var overrideByDepth = new Dictionary<int, OverrideEntry>();
-                foreach (var o in conflict.Overrides)
-                {
-                    if (!overrideByDepth.ContainsKey(o.Depth))
-                        overrideByDepth[o.Depth] = o;
-                }
-                foreach (var level in _report.Chain)
-                {
-                    if (overrideByDepth.TryGetValue(level.Depth, out var entry))
+                // Values — compact inline display
+                string valuesStr = string.Join(" → ",
+                    conflict.Overrides.Select(o =>
                     {
-                        string display = TruncateValue(entry.Value, 14);
-                        GUILayout.Label(display, EditorStyles.miniLabel, GUILayout.Width(100));
-                    }
-                    else
-                    {
-                        GUILayout.Label("—", EditorStyles.miniLabel, GUILayout.Width(100));
-                    }
-                }
+                        string v = TruncateValue(o.Value, 12);
+                        return $"D{o.Depth}:{v}";
+                    }));
+                GUILayout.Label(valuesStr, EditorStyles.miniLabel);
 
                 EditorGUILayout.EndHorizontal();
 
@@ -431,9 +380,6 @@ namespace SashaRX.PrefabDoctor
                     Event.current.Use();
                 }
             }
-
-            EditorGUILayout.EndScrollView();
-            GUILayout.EndArea();
         }
 
         // ── Context Menu ───────────────────────────────────────────
