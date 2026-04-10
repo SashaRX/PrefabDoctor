@@ -78,10 +78,9 @@ namespace SashaRX.PrefabDoctor
                 return;
             }
 
-            // Split view — use remaining space
-            EditorGUILayout.BeginVertical(GUILayout.ExpandHeight(true));
-            var rect = GUILayoutUtility.GetRect(10, 10,
-                GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+            // Split view — get remaining space
+            var rect = EditorGUILayout.GetControlRect(false, position.height - GUILayoutUtility.GetLastRect().yMax - 4);
+            if (rect.height < 10) return; // layout not ready yet
             float splitX = rect.x + rect.width * _splitRatio;
 
             // Handle split drag
@@ -111,7 +110,6 @@ namespace SashaRX.PrefabDoctor
 
             DrawGameObjectTree(leftRect);
             DrawConflictTable(rightRect);
-            EditorGUILayout.EndVertical();
         }
 
         // ── Toolbar ────────────────────────────────────────────────
@@ -403,8 +401,13 @@ namespace SashaRX.PrefabDoctor
                 GUILayout.Label(conflict.Key.PropertyPath, EditorStyles.miniLabel,
                     GUILayout.Width(160));
 
-                // Values per depth
-                var overrideByDepth = conflict.Overrides.ToDictionary(o => o.Depth);
+                // Values per depth (may have duplicates on same depth — take first)
+                var overrideByDepth = new Dictionary<int, OverrideEntry>();
+                foreach (var o in conflict.Overrides)
+                {
+                    if (!overrideByDepth.ContainsKey(o.Depth))
+                        overrideByDepth[o.Depth] = o;
+                }
                 foreach (var level in _report.Chain)
                 {
                     if (overrideByDepth.TryGetValue(level.Depth, out var entry))
