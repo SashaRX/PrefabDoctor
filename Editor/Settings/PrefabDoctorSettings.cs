@@ -1,16 +1,16 @@
 using UnityEngine;
 
-namespace SashaRX.OverrideDoctor
+namespace SashaRX.PrefabDoctor
 {
     /// <summary>
-    /// Persistent settings for Override Doctor.
-    /// Create via Assets → Create → Override Doctor → Settings,
+    /// Persistent settings for Prefab Doctor.
+    /// Create via Assets → Create → Prefab Doctor → Settings,
     /// or the tool will use defaults.
     /// </summary>
     [CreateAssetMenu(
-        fileName = "OverrideDoctorSettings",
-        menuName = "Override Doctor/Settings")]
-    public class OverrideDoctorSettings : ScriptableObject
+        fileName = "PrefabDoctorSettings",
+        menuName = "Prefab Doctor/Settings")]
+    public class PrefabDoctorSettings : ScriptableObject
     {
         [Header("Float Comparison")]
         [Tooltip("Absolute epsilon for position/scale properties")]
@@ -46,25 +46,25 @@ namespace SashaRX.OverrideDoctor
 
         // ── Singleton access ───────────────────────────────────────
 
-        private static OverrideDoctorSettings s_Instance;
+        private static PrefabDoctorSettings s_Instance;
 
-        public static OverrideDoctorSettings GetOrCreateDefault()
+        public static PrefabDoctorSettings GetOrCreateDefault()
         {
             if (s_Instance != null) return s_Instance;
 
 #if UNITY_EDITOR
             // Try to find existing asset
-            var guids = UnityEditor.AssetDatabase.FindAssets("t:OverrideDoctorSettings");
+            var guids = UnityEditor.AssetDatabase.FindAssets("t:PrefabDoctorSettings");
             if (guids.Length > 0)
             {
                 string path = UnityEditor.AssetDatabase.GUIDToAssetPath(guids[0]);
-                s_Instance = UnityEditor.AssetDatabase.LoadAssetAtPath<OverrideDoctorSettings>(path);
+                s_Instance = UnityEditor.AssetDatabase.LoadAssetAtPath<PrefabDoctorSettings>(path);
                 if (s_Instance != null) return s_Instance;
             }
 #endif
 
             // Return runtime defaults (not saved)
-            s_Instance = CreateInstance<OverrideDoctorSettings>();
+            s_Instance = CreateInstance<PrefabDoctorSettings>();
             return s_Instance;
         }
     }

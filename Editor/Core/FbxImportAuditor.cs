@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
-namespace SashaRX.OverrideDoctor
+namespace SashaRX.PrefabDoctor
 {
     /// <summary>
     /// Analyzes ModelImporter settings and compares them against

@@ -1,6 +1,6 @@
 {
-  "name": "SashaRX.OverrideDoctor.Editor",
-  "rootNamespace": "SashaRX.OverrideDoctor",
+  "name": "SashaRX.PrefabDoctor.Editor",
+  "rootNamespace": "SashaRX.PrefabDoctor",
   "references": [],
   "includePlatforms": [
     "Editor"

@@ -1,15 +1,15 @@
 using UnityEditor;
 using UnityEngine;
 
-namespace SashaRX.OverrideDoctor
+namespace SashaRX.PrefabDoctor
 {
     /// <summary>
     /// Adds context menu items to Hierarchy and Project windows
-    /// for quick access to Override Doctor.
+    /// for quick access to Prefab Doctor.
     /// </summary>
-    public static class OverrideDoctorMenuItems
+    public static class PrefabDoctorMenuItems
     {
-        [MenuItem("GameObject/Override Doctor/Analyze This Prefab", false, 49)]
+        [MenuItem("GameObject/Prefab Doctor/Analyze This Prefab", false, 49)]
         private static void AnalyzeFromHierarchy()
         {
             var go = Selection.activeGameObject;
@@ -18,22 +18,22 @@ namespace SashaRX.OverrideDoctor
             var root = PrefabUtility.GetOutermostPrefabInstanceRoot(go);
             if (root == null)
             {
-                Debug.LogWarning("[Override Doctor] Selected object is not a prefab instance.");
+                Debug.LogWarning("[Prefab Doctor] Selected object is not a prefab instance.");
                 return;
             }
 
-            var window = EditorWindow.GetWindow<OverrideDoctorWindow>("Override Doctor");
+            var window = EditorWindow.GetWindow<PrefabDoctorWindow>("Prefab Doctor");
             window.SetTargetAndAnalyze(root);
         }
 
-        [MenuItem("GameObject/Override Doctor/Analyze This Prefab", true)]
+        [MenuItem("GameObject/Prefab Doctor/Analyze This Prefab", true)]
         private static bool AnalyzeFromHierarchyValidate()
         {
             return Selection.activeGameObject != null &&
                    PrefabUtility.IsPartOfPrefabInstance(Selection.activeGameObject);
         }
 
-        [MenuItem("GameObject/Override Doctor/Analyze Subtree From Here", false, 50)]
+        [MenuItem("GameObject/Prefab Doctor/Analyze Subtree From Here", false, 50)]
         private static void AnalyzeSubtreeFromHierarchy()
         {
             var go = Selection.activeGameObject;
@@ -42,11 +42,11 @@ namespace SashaRX.OverrideDoctor
             var root = PrefabUtility.GetOutermostPrefabInstanceRoot(go);
             if (root == null) return;
 
-            var window = EditorWindow.GetWindow<OverrideDoctorWindow>("Override Doctor");
+            var window = EditorWindow.GetWindow<PrefabDoctorWindow>("Prefab Doctor");
             window.SetTargetAndAnalyze(root, go.transform);
         }
 
-        [MenuItem("GameObject/Override Doctor/Analyze Subtree From Here", true)]
+        [MenuItem("GameObject/Prefab Doctor/Analyze Subtree From Here", true)]
         private static bool AnalyzeSubtreeValidate()
         {
             return Selection.activeGameObject != null &&

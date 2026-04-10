@@ -1,6 +1,6 @@
-# Override Doctor
+# Prefab Doctor
 
-Unity Editor tool for detecting and resolving override conflicts in deeply nested prefabs.
+Make Prefab Great Again — Unity Editor tool for detecting and resolving override conflicts in deeply nested prefabs.
 
 ## Problem
 
@@ -17,7 +17,7 @@ Unity's nested prefab system stores overrides per-level, but provides no cross-l
 
 ## Smart Comparisons
 
-Override Doctor understands that not all differences are real differences:
+Prefab Doctor understands that not all differences are real differences:
 
 | Type | Example | How it's handled |
 |------|---------|-----------------|
@@ -32,7 +32,7 @@ Override Doctor understands that not all differences are real differences:
 ### Git URL (recommended)
 In Unity Package Manager → Add package from git URL:
 ```
-https://github.com/SashaRX/OverrideDoctor.git
+https://github.com/SashaRX/PrefabDoctor.git
 ```
 
 ### Local
@@ -40,7 +40,7 @@ Clone the repo and add via Package Manager → Add package from disk → select 
 
 ## Usage
 
-1. **Tools → Override Doctor** (or `Ctrl+Alt+O`)
+1. **Tools → Prefab Doctor** (or `Ctrl+Alt+O`)
 2. Select a prefab instance in the Hierarchy (or drag into the target field)
 3. Click **Analyze**
 4. Left panel shows GameObjects with colored badges (red = ping-pong, yellow = multi-override)

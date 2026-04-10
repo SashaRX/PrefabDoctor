@@ -5,10 +5,10 @@ using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
-namespace SashaRX.OverrideDoctor
+namespace SashaRX.PrefabDoctor
 {
     /// <summary>
-    /// Draws the "Project Scan" tab inside OverrideDoctorWindow.
+    /// Draws the "Project Scan" tab inside PrefabDoctorWindow.
     /// Separated to keep the main window file manageable.
     /// </summary>
     internal class ProjectScanPanel

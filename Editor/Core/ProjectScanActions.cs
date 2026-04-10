@@ -5,7 +5,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 
-namespace SashaRX.OverrideDoctor
+namespace SashaRX.PrefabDoctor
 {
     /// <summary>
     /// Actions for resolving issues found by ProjectScanner.
@@ -25,7 +25,7 @@ namespace SashaRX.OverrideDoctor
             var modelAsset = AssetDatabase.LoadMainAssetAtPath(fbxPath) as GameObject;
             if (modelAsset == null)
             {
-                Debug.LogError($"[Override Doctor] Cannot load model at {fbxPath}");
+                Debug.LogError($"[Prefab Doctor] Cannot load model at {fbxPath}");
                 return null;
             }
 
@@ -44,12 +44,12 @@ namespace SashaRX.OverrideDoctor
                 var savedPrefab = PrefabUtility.SaveAsPrefabAsset(instance, wrapperPath);
                 if (savedPrefab != null)
                 {
-                    Debug.Log($"[Override Doctor] Created wrapper: {wrapperPath} → base: {fbxPath}");
+                    Debug.Log($"[Prefab Doctor] Created wrapper: {wrapperPath} → base: {fbxPath}");
                     return wrapperPath;
                 }
                 else
                 {
-                    Debug.LogError($"[Override Doctor] Failed to save wrapper at {wrapperPath}");
+                    Debug.LogError($"[Prefab Doctor] Failed to save wrapper at {wrapperPath}");
                     return null;
                 }
             }
@@ -98,11 +98,11 @@ namespace SashaRX.OverrideDoctor
             var wrapperAsset = AssetDatabase.LoadMainAssetAtPath(wrapperPath) as GameObject;
             if (wrapperAsset == null)
             {
-                Debug.LogError($"[Override Doctor] Cannot load wrapper at {wrapperPath}");
+                Debug.LogError($"[Prefab Doctor] Cannot load wrapper at {wrapperPath}");
                 return false;
             }
 
-            Undo.SetCurrentGroupName("Override Doctor: Replace FBX base with wrapper");
+            Undo.SetCurrentGroupName("Prefab Doctor: Replace FBX base with wrapper");
 
 #if UNITY_2022_1_OR_NEWER
             var settings = new PrefabUtility.PrefabReplacingSettings
@@ -116,13 +116,13 @@ namespace SashaRX.OverrideDoctor
                 sceneInstance, wrapperAsset, settings, InteractionMode.UserAction);
 #else
             // Fallback for older Unity: manual replacement
-            Debug.LogWarning("[Override Doctor] ReplacePrefabAssetOfPrefabInstance " +
+            Debug.LogWarning("[Prefab Doctor] ReplacePrefabAssetOfPrefabInstance " +
                              "with settings requires Unity 2022.1+. " +
                              "Please replace manually or upgrade Unity.");
             return false;
 #endif
 
-            Debug.Log($"[Override Doctor] Replaced base of '{sceneInstance.name}' " +
+            Debug.Log($"[Prefab Doctor] Replaced base of '{sceneInstance.name}' " +
                       $"with wrapper '{wrapperPath}'");
             return true;
         }
@@ -145,7 +145,7 @@ namespace SashaRX.OverrideDoctor
             }
 
             if (removed > 0)
-                Debug.Log($"[Override Doctor] Removed {removed} missing scripts from {prefabPath}");
+                Debug.Log($"[Prefab Doctor] Removed {removed} missing scripts from {prefabPath}");
 
             return removed;
         }
@@ -206,7 +206,7 @@ namespace SashaRX.OverrideDoctor
             int removed = beforeCount - afterCount;
 
             if (removed > 0)
-                Debug.Log($"[Override Doctor] Removed {removed} unused overrides from {prefabPath}");
+                Debug.Log($"[Prefab Doctor] Removed {removed} unused overrides from {prefabPath}");
             return removed;
 #else
             // Manual fallback: remove overrides with invalid property paths
@@ -253,7 +253,7 @@ namespace SashaRX.OverrideDoctor
             if (removed > 0)
             {
                 PrefabUtility.SetPropertyModifications(prefab, keep.ToArray());
-                Debug.Log($"[Override Doctor] Removed {removed} unused overrides (manual) " +
+                Debug.Log($"[Prefab Doctor] Removed {removed} unused overrides (manual) " +
                           $"from {AssetDatabase.GetAssetPath(prefab)}");
             }
 
@@ -299,7 +299,7 @@ namespace SashaRX.OverrideDoctor
 #endif
 
             if (total > 0)
-                Debug.Log($"[Override Doctor] Batch removed {total} unused overrides " +
+                Debug.Log($"[Prefab Doctor] Batch removed {total} unused overrides " +
                           $"from {prefabPaths.Count()} prefabs");
 
             return total;

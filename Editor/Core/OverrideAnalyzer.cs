@@ -7,7 +7,7 @@ using UnityEditor;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
-namespace SashaRX.OverrideDoctor
+namespace SashaRX.PrefabDoctor
 {
     /// <summary>
     /// Core analysis engine. Walks the nesting chain, collects overrides,
@@ -661,7 +661,7 @@ namespace SashaRX.OverrideDoctor
                 if (propertyPath.StartsWith(prefix, StringComparison.Ordinal))
                     return true;
 
-            var settings = OverrideDoctorSettings.GetOrCreateDefault();
+            var settings = PrefabDoctorSettings.GetOrCreateDefault();
             if (settings.AdditionalIgnoredPrefixes != null)
             {
                 foreach (var prefix in settings.AdditionalIgnoredPrefixes)
@@ -677,7 +677,7 @@ namespace SashaRX.OverrideDoctor
 
         private static bool IsIgnoredComponentType(string typeName)
         {
-            var settings = OverrideDoctorSettings.GetOrCreateDefault();
+            var settings = PrefabDoctorSettings.GetOrCreateDefault();
             if (settings.IgnoredComponentTypes == null) return false;
 
             foreach (var ignored in settings.IgnoredComponentTypes)

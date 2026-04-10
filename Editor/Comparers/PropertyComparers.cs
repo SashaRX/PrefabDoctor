@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
 
-namespace SashaRX.OverrideDoctor
+namespace SashaRX.PrefabDoctor
 {
     /// <summary>
     /// Determines whether two PropertyModification values represent
@@ -165,7 +165,7 @@ namespace SashaRX.OverrideDoctor
 
     /// <summary>
     /// Routes property paths to the appropriate comparer.
-    /// Reads epsilon values from OverrideDoctorSettings.
+    /// Reads epsilon values from PrefabDoctorSettings.
     /// </summary>
     internal static class ComparerRouter
     {
@@ -178,7 +178,7 @@ namespace SashaRX.OverrideDoctor
         private static void EnsureInitialized()
         {
             if (s_Initialized) return;
-            var settings = OverrideDoctorSettings.GetOrCreateDefault();
+            var settings = PrefabDoctorSettings.GetOrCreateDefault();
             s_Float = new FloatComparer(settings.PositionEpsilon, settings.RelativeEpsilon);
             s_FloatLoose = new FloatComparer(settings.GenericFloatEpsilon, settings.GenericFloatEpsilon);
             s_Euler = new EulerComparer(settings.EulerAngleThreshold);

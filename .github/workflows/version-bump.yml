@@ -1,0 +1,54 @@
+name: Auto Version Bump
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Editor/**'
+
+jobs:
+  bump:
+    name: Bump patch version
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, 'Bump version')"
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump patch version in package.json
+        id: bump
+        run: |
+          CURRENT=$(python3 -c "import json; print(json.load(open('package.json'))['version'])")
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          python3 -c "
+          import json
+          with open('package.json', 'r') as f:
+              data = json.load(f)
+          data['version'] = '${NEW_VERSION}'
+          with open('package.json', 'w') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+          "
+          echo "old=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "new=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          if git diff --cached --quiet; then
+            echo "No version change"
+          else
+            git commit -m "Bump version to ${{ steps.bump.outputs.new }} [skip ci]"
+            git push
+            echo "Bumped: ${{ steps.bump.outputs.old }} → ${{ steps.bump.outputs.new }}"
+          fi

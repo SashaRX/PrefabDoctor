@@ -3,7 +3,7 @@ using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
-namespace SashaRX.OverrideDoctor
+namespace SashaRX.PrefabDoctor
 {
     /// <summary>
     /// Operations for resolving override conflicts.
@@ -17,7 +17,7 @@ namespace SashaRX.OverrideDoctor
         /// </summary>
         public static void KeepOnlyAtDepth(GameObject root, PropertyConflict conflict, int keepDepth)
         {
-            Undo.SetCurrentGroupName($"Override Doctor: Keep at depth {keepDepth}");
+            Undo.SetCurrentGroupName($"Prefab Doctor: Keep at depth {keepDepth}");
             int group = Undo.GetCurrentGroup();
 
             var chain = new OverrideAnalyzer().BuildChain(root);
@@ -40,7 +40,7 @@ namespace SashaRX.OverrideDoctor
         /// </summary>
         public static void RevertAll(GameObject root, PropertyConflict conflict)
         {
-            Undo.SetCurrentGroupName("Override Doctor: Revert all");
+            Undo.SetCurrentGroupName("Prefab Doctor: Revert all");
             int group = Undo.GetCurrentGroup();
 
             var chain = new OverrideAnalyzer().BuildChain(root);
@@ -61,7 +61,7 @@ namespace SashaRX.OverrideDoctor
         /// </summary>
         public static int CleanOrphans(GameObject root)
         {
-            Undo.SetCurrentGroupName("Override Doctor: Clean orphans");
+            Undo.SetCurrentGroupName("Prefab Doctor: Clean orphans");
             int group = Undo.GetCurrentGroup();
 
             var mods = PrefabUtility.GetPropertyModifications(root);
@@ -87,7 +87,7 @@ namespace SashaRX.OverrideDoctor
         /// </summary>
         public static int CleanInsignificant(GameObject root, List<NestingLevel> chain)
         {
-            Undo.SetCurrentGroupName("Override Doctor: Clean insignificant");
+            Undo.SetCurrentGroupName("Prefab Doctor: Clean insignificant");
             int group = Undo.GetCurrentGroup();
             int totalRemoved = 0;
 
@@ -156,7 +156,7 @@ namespace SashaRX.OverrideDoctor
         /// </summary>
         public static void BatchRevert(GameObject root, IEnumerable<PropertyConflict> conflicts)
         {
-            Undo.SetCurrentGroupName("Override Doctor: Batch revert");
+            Undo.SetCurrentGroupName("Prefab Doctor: Batch revert");
             int group = Undo.GetCurrentGroup();
 
             var chain = new OverrideAnalyzer().BuildChain(root);

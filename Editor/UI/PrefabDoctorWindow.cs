@@ -5,12 +5,12 @@ using UnityEditor;
 using UnityEditor.IMGUI.Controls;
 using UnityEngine;
 
-namespace SashaRX.OverrideDoctor
+namespace SashaRX.PrefabDoctor
 {
-    public class OverrideDoctorWindow : EditorWindow
+    public class PrefabDoctorWindow : EditorWindow
     {
-        [MenuItem("Tools/Override Doctor %&o")]
-        private static void Open() => GetWindow<OverrideDoctorWindow>("Override Doctor");
+        [MenuItem("Tools/Prefab Doctor %&o")]
+        private static void Open() => GetWindow<PrefabDoctorWindow>("Prefab Doctor");
 
         // ── State ──────────────────────────────────────────────────
         private int _activeTab; // 0 = Instance Analysis, 1 = Project Scan
@@ -170,14 +170,14 @@ namespace SashaRX.OverrideDoctor
                 if (GUILayout.Button("Clean Orphans", EditorStyles.toolbarButton, GUILayout.Width(90)))
                 {
                     int removed = OverrideActions.CleanOrphans(_target);
-                    Debug.Log($"[Override Doctor] Cleaned {removed} orphaned overrides");
+                    Debug.Log($"[Prefab Doctor] Cleaned {removed} orphaned overrides");
                     RunAnalysis();
                 }
 
                 if (GUILayout.Button("Clean Insignificant", EditorStyles.toolbarButton, GUILayout.Width(110)))
                 {
                     int removed = OverrideActions.CleanInsignificant(_target, _report.Chain);
-                    Debug.Log($"[Override Doctor] Cleaned {removed} insignificant overrides");
+                    Debug.Log($"[Prefab Doctor] Cleaned {removed} insignificant overrides");
                     RunAnalysis();
                 }
             }

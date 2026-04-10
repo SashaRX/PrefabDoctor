@@ -1,4 +1,4 @@
-# AI Agent Rules — Unity Package (com.sasharx.override-doctor)
+# AI Agent Rules — Unity Package (com.sasharx.prefab-doctor)
 
 Shared rules for **all AI agents** (Codex, Claude, etc.) working on this repository.
 
@@ -22,7 +22,7 @@ Shared rules for **all AI agents** (Codex, Claude, etc.) working on this reposit
 - Do NOT commit bulk `.meta` changes unless files were actually added/removed
 
 ### Assembly & platform
-- All code under `Editor/` with `SashaRX.OverrideDoctor.Editor.asmdef`
+- All code under `Editor/` with `SashaRX.PrefabDoctor.Editor.asmdef`
 - `includePlatforms: ["Editor"]` — never leak into runtime builds
 - No runtime dependencies — this is a pure editor tool
 
@@ -44,7 +44,7 @@ Shared rules for **all AI agents** (Codex, Claude, etc.) working on this reposit
 - Group related operations with `Undo.SetCurrentGroupName` + `CollapseUndoOperations`
 
 ### Code conventions
-- Namespace: `SashaRX.OverrideDoctor`
+- Namespace: `SashaRX.PrefabDoctor`
 - `internal` visibility for cross-tool helpers
 - Float parsing: always `CultureInfo.InvariantCulture`
 - Property comparison: route through `ComparerRouter`, never raw string compare for numerics

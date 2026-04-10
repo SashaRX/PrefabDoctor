@@ -3,7 +3,7 @@
 ## [0.2.0] - 2026-04-10
 
 ### Added — Project Scanner
-- Project-wide prefab health scan (Tools → Override Doctor → Project Scan tab)
+- Project-wide prefab health scan (Tools → Prefab Doctor → Project Scan tab)
 - Detection: FBX-based prefabs without wrapper, missing scripts, broken references, unused overrides, bad materials (error/unsupported shaders)
 - FBX Import Auditor: flags importMaterials/importAnimation/importCameras/importLights generating unnecessary overrides
 - FBX→Wrapper index: finds existing prefab wrappers for each FBX model
@@ -14,7 +14,7 @@
 - Scan scope: entire project or specific folder
 
 ### Changed
-- OverrideDoctorWindow now has two tabs: "Instance Analysis" (original) and "Project Scan" (new)
+- PrefabDoctorWindow now has two tabs: "Instance Analysis" (original) and "Project Scan" (new)
 
 ## [0.1.0] - 2026-04-10
 

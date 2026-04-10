@@ -16,23 +16,23 @@ See `AGENTS.md` for shared rules that apply to all AI agents.
 
 ## Code Rules
 
-- Namespace: `SashaRX.OverrideDoctor`
+- Namespace: `SashaRX.PrefabDoctor`
 - `internal` visibility for cross-tool helpers (same assembly)
 - `Undo.RecordObject` / `Undo.CollapseUndoOperations` for all prefab modifications
-- Logging via `Debug.Log("[Override Doctor] ...")` prefix
+- Logging via `Debug.Log("[Prefab Doctor] ...")` prefix
 - All PropertyModification writes use read-modify-write pattern on full array
 - SerializedObject instances cached per analysis run, cleared after
 - Never create .meta files manually — Unity generates them
 
 ## Architecture Quick Reference
 
-- **Entry point:** `Editor/UI/OverrideDoctorWindow.cs` — main EditorWindow (Tools → Override Doctor)
-- **Context menu:** `Editor/UI/OverrideDoctorMenuItems.cs` — Hierarchy right-click integration
+- **Entry point:** `Editor/UI/PrefabDoctorWindow.cs` — main EditorWindow (Tools → Prefab Doctor)
+- **Context menu:** `Editor/UI/PrefabDoctorMenuItems.cs` — Hierarchy right-click integration
 - **Core engine:** `Editor/Core/OverrideAnalyzer.cs` — chain walk, override collection, ping-pong detection
 - **Actions:** `Editor/Core/OverrideActions.cs` — revert/apply/clean with Undo
 - **Models:** `Editor/Core/OverrideModels.cs` — data structures
 - **Comparers:** `Editor/Comparers/PropertyComparers.cs` — epsilon float, quaternion Dot, Euler normalization
-- **Settings:** `Editor/Settings/OverrideDoctorSettings.cs` — configurable epsilons via ScriptableObject
+- **Settings:** `Editor/Settings/PrefabDoctorSettings.cs` — configurable epsilons via ScriptableObject
 
 ## Key Patterns
 
