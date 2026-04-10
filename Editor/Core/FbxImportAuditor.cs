@@ -93,7 +93,7 @@ namespace SashaRX.PrefabDoctor
         private static void CheckImportMaterials(ModelImporter importer,
             GameObject prefabRoot, List<FbxImportIssue> issues)
         {
-            if (!importer.importMaterials) return;
+            if (importer.materialImportMode == ModelImporterMaterialImportMode.None) return;
 
             // Count how many renderers have ALL materials overridden
             var renderers = prefabRoot.GetComponentsInChildren<Renderer>(true);

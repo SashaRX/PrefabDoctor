@@ -104,17 +104,17 @@ namespace SashaRX.PrefabDoctor
 
             Undo.SetCurrentGroupName("Prefab Doctor: Replace FBX base with wrapper");
 
-#if UNITY_2022_1_OR_NEWER
-            var settings = new PrefabUtility.PrefabReplacingSettings
-            {
-                objectMatchMode = PrefabUtility.PrefabReplacingSettings.ObjectMatchMode.ByHierarchy,
-                prefabOverridesOptions = PrefabUtility.PrefabReplacingSettings
-                    .PrefabOverridesOptions.KeepAllPossibleOverrides
-            };
-
+            // ReplacePrefabAssetOfPrefabInstance with PrefabReplacingSettings
+            // requires Unity 2022.3+ and may not be available in all versions.
+            // Use the simpler overload that exists since 2021.
             PrefabUtility.ReplacePrefabAssetOfPrefabInstance(
-                sceneInstance, wrapperAsset, settings, InteractionMode.UserAction);
-#else
+                sceneInstance, wrapperAsset, InteractionMode.UserAction);
+
+#if FALSE // PrefabReplacingSettings — enable when targeting Unity 2023+
+            // var settings = new PrefabReplacingSettings { ... };
+#endif
+
+#if FALSE
             // Fallback for older Unity: manual replacement
             Debug.LogWarning("[Prefab Doctor] ReplacePrefabAssetOfPrefabInstance " +
                              "with settings requires Unity 2022.1+. " +
