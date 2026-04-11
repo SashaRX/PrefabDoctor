@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using Debug = UnityEngine.Debug;
@@ -46,6 +47,10 @@ namespace SashaRX.PrefabDoctor
         // Selection for batch ops
         private HashSet<int> _selectedConflicts = new();
 
+        // Draw error isolation (see OnGUI try/catch)
+        private Exception _lastDrawError;
+        private bool _loggedDrawError;
+
         private enum FilterMode
         {
             ConflictsOnly,
@@ -59,42 +64,85 @@ namespace SashaRX.PrefabDoctor
 
         private void OnGUI()
         {
-            // Tab bar
-            _activeTab = GUILayout.Toolbar(_activeTab, s_TabNames, GUILayout.Height(22));
-
-            if (_activeTab == 1)
+            // If a previous draw threw, short-circuit to an error panel so IMGUI's
+            // Begin/End stack cannot be corrupted by retrying the broken path.
+            if (_lastDrawError != null)
             {
-                _scanPanel.OnGUI();
+                DrawDrawErrorState();
                 return;
             }
 
-            // Instance Analysis tab
-            DrawToolbar();
-            DrawStatusBar();
-
-            if (_report == null || _report.GameObjects.Count == 0)
+            try
             {
-                DrawEmptyState();
-                return;
-            }
+                // Tab bar
+                _activeTab = GUILayout.Toolbar(_activeTab, s_TabNames, GUILayout.Height(22));
 
-            // Simple horizontal split — no manual rect math
-            float leftWidth = position.width * _splitRatio;
+                if (_activeTab == 1)
+                {
+                    _scanPanel.OnGUI();
+                    return;
+                }
+
+                // Instance Analysis tab
+                DrawToolbar();
+                DrawStatusBar();
+
+                if (_report == null || _report.GameObjects.Count == 0)
+                {
+                    DrawEmptyState();
+                    return;
+                }
+
+                // Simple horizontal split — no manual rect math
+                float leftWidth = position.width * _splitRatio;
+
+                EditorGUILayout.BeginHorizontal();
+
+                // Left panel: GameObject tree
+                _leftScroll = EditorGUILayout.BeginScrollView(_leftScroll,
+                    GUILayout.Width(leftWidth), GUILayout.ExpandHeight(true));
+                DrawGameObjectList();
+                EditorGUILayout.EndScrollView();
+
+                // Right panel: Conflict table
+                _rightScroll = EditorGUILayout.BeginScrollView(_rightScroll,
+                    GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+                DrawConflictList();
+                EditorGUILayout.EndScrollView();
+
+                EditorGUILayout.EndHorizontal();
+            }
+            catch (Exception ex)
+            {
+                _lastDrawError = ex;
+                if (!_loggedDrawError)
+                {
+                    _loggedDrawError = true;
+                    Debug.LogError($"[Prefab Doctor] OnGUI failed: {ex}");
+                }
+                Repaint();
+            }
+        }
+
+        private void DrawDrawErrorState()
+        {
+            EditorGUILayout.Space(8);
+            EditorGUILayout.HelpBox(
+                "Prefab Doctor hit a draw error and paused the window to protect Unity's IMGUI layout.\n\n"
+                + _lastDrawError.Message,
+                MessageType.Error);
 
             EditorGUILayout.BeginHorizontal();
-
-            // Left panel: GameObject tree
-            _leftScroll = EditorGUILayout.BeginScrollView(_leftScroll,
-                GUILayout.Width(leftWidth), GUILayout.ExpandHeight(true));
-            DrawGameObjectList();
-            EditorGUILayout.EndScrollView();
-
-            // Right panel: Conflict table
-            _rightScroll = EditorGUILayout.BeginScrollView(_rightScroll,
-                GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
-            DrawConflictList();
-            EditorGUILayout.EndScrollView();
-
+            if (GUILayout.Button("Retry", GUILayout.Width(80)))
+            {
+                _lastDrawError = null;
+                _loggedDrawError = false;
+                Repaint();
+            }
+            if (GUILayout.Button("Copy details", GUILayout.Width(110)))
+            {
+                EditorGUIUtility.systemCopyBuffer = _lastDrawError.ToString();
+            }
             EditorGUILayout.EndHorizontal();
         }
 
