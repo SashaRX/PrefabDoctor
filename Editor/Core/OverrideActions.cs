@@ -95,6 +95,49 @@ namespace SashaRX.PrefabDoctor
         }
 
         /// <summary>
+        /// Bulk variant of <see cref="CleanOrphans"/>: for every prefab
+        /// instance root in <paramref name="instanceRoots"/>, read its
+        /// PropertyModifications, drop every entry whose target is null,
+        /// and write the cleaned array back. One Undo group for the entire
+        /// batch so the whole operation can be reverted with a single
+        /// Ctrl+Z. Returns the total number of removed modifications.
+        /// </summary>
+        public static int CleanOrphansHierarchy(IReadOnlyList<GameObject> instanceRoots)
+        {
+            if (instanceRoots == null || instanceRoots.Count == 0) return 0;
+
+            Undo.SetCurrentGroupName("Prefab Doctor: Clean orphans (hierarchy)");
+            int group = Undo.GetCurrentGroup();
+            int totalRemoved = 0;
+
+            try
+            {
+                for (int i = 0; i < instanceRoots.Count; i++)
+                {
+                    var root = instanceRoots[i];
+                    if (root == null) continue;
+
+                    var mods = PrefabUtility.GetPropertyModifications(root);
+                    if (mods == null || mods.Length == 0) continue;
+
+                    var clean = mods.Where(m => m.target != null).ToArray();
+                    int removed = mods.Length - clean.Length;
+                    if (removed == 0) continue;
+
+                    Undo.RecordObject(root, "Clean orphans (hierarchy)");
+                    PrefabUtility.SetPropertyModifications(root, clean);
+                    totalRemoved += removed;
+                }
+
+                return totalRemoved;
+            }
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
+        }
+
+        /// <summary>
         /// Remove insignificant overrides — those where value matches source within epsilon.
         /// Returns count of removed overrides.
         /// </summary>

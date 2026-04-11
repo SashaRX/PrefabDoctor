@@ -245,11 +245,32 @@ namespace SashaRX.PrefabDoctor
             // Batch actions
             if (_report != null)
             {
-                if (GUILayout.Button("Clean Orphans", EditorStyles.toolbarButton, GUILayout.Width(90)))
+                // In hierarchy mode, Clean Orphans operates on EVERY prefab
+                // instance root in the current report (bulk), not just
+                // _target. A single scene can easily have ~1000 orphan mods
+                // per instance, so the scoped variant is basically useless
+                // for large levels. Label and confirmation dialog change
+                // so the user knows what they're about to do.
+                bool hierarchy = _report.IsHierarchyMode
+                    && _report.HierarchyInstanceRoots != null
+                    && _report.HierarchyInstanceRoots.Count > 0;
+
+                string cleanLabel = hierarchy
+                    ? $"Clean Orphans ({_report.HierarchyInstanceRoots.Count})"
+                    : "Clean Orphans";
+                float cleanWidth = hierarchy ? 140f : 90f;
+
+                if (GUILayout.Button(cleanLabel, EditorStyles.toolbarButton,
+                        GUILayout.Width(cleanWidth)))
                 {
-                    int removed = OverrideActions.CleanOrphans(_target);
-                    Debug.Log($"[Prefab Doctor] Cleaned {removed} orphaned overrides");
-                    RunAnalysis();
+                    if (hierarchy)
+                        DoCleanOrphansHierarchy();
+                    else
+                    {
+                        int removed = OverrideActions.CleanOrphans(_target);
+                        Debug.Log($"[Prefab Doctor] Cleaned {removed} orphaned overrides");
+                        RunAnalysis();
+                    }
                 }
 
                 if (GUILayout.Button("Clean Insignificant", EditorStyles.toolbarButton, GUILayout.Width(110)))
@@ -797,6 +818,46 @@ namespace SashaRX.PrefabDoctor
                 _progress = _hierarchyJob.Current;
             }
             Repaint();
+        }
+
+        private void DoCleanOrphansHierarchy()
+        {
+            if (_report == null || !_report.IsHierarchyMode) return;
+            var roots = _report.HierarchyInstanceRoots;
+            if (roots == null || roots.Count == 0)
+            {
+                EditorUtility.DisplayDialog("Prefab Doctor",
+                    "No prefab instance roots recorded in the current report.",
+                    "OK");
+                return;
+            }
+
+            if (_report.TotalOrphan == 0)
+            {
+                EditorUtility.DisplayDialog("Prefab Doctor",
+                    "No orphan overrides in the current report — nothing to clean.",
+                    "OK");
+                return;
+            }
+
+            bool confirmed = EditorUtility.DisplayDialog(
+                "Clean Orphans (Hierarchy)",
+                $"Remove orphan PropertyModifications from {roots.Count} prefab instance"
+                + (roots.Count == 1 ? "" : "s") + " in the current hierarchy?\n\n"
+                + $"Detected {_report.TotalOrphan} orphan conflicts across those instances.\n\n"
+                + "Supports Undo (Ctrl+Z). The containing prefabs / scenes will be marked dirty.",
+                "Clean",
+                "Cancel");
+
+            if (!confirmed) return;
+
+            int removed = OverrideActions.CleanOrphansHierarchy(roots);
+            Debug.Log(
+                $"[Prefab Doctor] Hierarchy: cleaned {removed} orphan modifications "
+                + $"across {roots.Count} prefab instances");
+
+            // Re-run analysis to refresh the report with the updated state.
+            RunHierarchyAnalysis();
         }
 
         private static int CountNestedPrefabInstances(Transform root)

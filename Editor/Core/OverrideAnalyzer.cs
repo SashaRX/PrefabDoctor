@@ -397,6 +397,12 @@ namespace SashaRX.PrefabDoctor
                 var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(instanceGO);
                 if (instanceRoot == null) instanceRoot = instanceGO;
 
+                // Record the concrete scene GameObject so the bulk Clean
+                // Orphans action can later call PrefabUtility.SetProperty-
+                // Modifications on it without re-walking the hierarchy.
+                if (instanceRoot != null)
+                    report.HierarchyInstanceRoots.Add(instanceRoot);
+
                 var chain = BuildChain(instanceRoot);
                 if (chain.Count >= 2)
                 {

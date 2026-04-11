@@ -145,5 +145,13 @@ namespace SashaRX.PrefabDoctor
 
         /// <summary>Number of PrefabInstance roots analyzed (hierarchy mode).</summary>
         public int InstancesAnalyzed;
+
+        /// <summary>
+        /// Every PrefabInstance root touched by this hierarchy run. Populated
+        /// only when <see cref="IsHierarchyMode"/> is true. Used by the
+        /// bulk Clean Orphans button in the window so it can iterate all
+        /// real scene GameObjects without re-walking the hierarchy.
+        /// </summary>
+        public List<GameObject> HierarchyInstanceRoots = new();
     }
 }
