@@ -43,6 +43,32 @@ namespace SashaRX.PrefabDoctor
         /// </summary>
         private readonly Dictionary<Object, SerializedObject> _soCache = new();
 
+        // Per-run snapshot of ignore rules — rebuilt at the top of each public
+        // entry point so the hot loop does not re-read settings per mod and
+        // does not have to concatenate static + dynamic prefix arrays on the
+        // fly. Lifetime matches _soCache: reset in each finally block.
+        private string[] _runIgnoredPrefixes;
+        private string[] _runIgnoredTypes;
+
+        private void BeginRun()
+        {
+            var settings = PrefabDoctorSettings.GetOrCreateDefault();
+            var extra = settings?.AdditionalIgnoredPrefixes ?? Array.Empty<string>();
+
+            if (extra.Length == 0)
+            {
+                _runIgnoredPrefixes = s_InternalPrefixes;
+            }
+            else
+            {
+                _runIgnoredPrefixes = new string[s_InternalPrefixes.Length + extra.Length];
+                Array.Copy(s_InternalPrefixes, 0, _runIgnoredPrefixes, 0, s_InternalPrefixes.Length);
+                Array.Copy(extra, 0, _runIgnoredPrefixes, s_InternalPrefixes.Length, extra.Length);
+            }
+
+            _runIgnoredTypes = settings?.IgnoredComponentTypes ?? Array.Empty<string>();
+        }
+
         /// <summary>
         /// Dispose every cached SerializedObject and empty the cache. Safe to
         /// call multiple times; safe to call when nothing is cached. Use from
@@ -54,6 +80,13 @@ namespace SashaRX.PrefabDoctor
             foreach (var so in _soCache.Values)
                 so?.Dispose();
             _soCache.Clear();
+        }
+
+        private void EndRun()
+        {
+            ClearSerializedObjectCache();
+            _runIgnoredPrefixes = null;
+            _runIgnoredTypes = null;
         }
 
         // ── Chain Building ─────────────────────────────────────────
@@ -173,6 +206,7 @@ namespace SashaRX.PrefabDoctor
             var sw = Stopwatch.StartNew();
             var report = new AnalysisReport { AnalyzedRoot = root };
 
+            BeginRun();
             try
             {
                 report.Chain = BuildChain(root);
@@ -215,7 +249,7 @@ namespace SashaRX.PrefabDoctor
             }
             finally
             {
-                ClearSerializedObjectCache();
+                EndRun();
                 report.AnalysisTimeMs = sw.ElapsedMilliseconds;
             }
 
@@ -240,6 +274,7 @@ namespace SashaRX.PrefabDoctor
                 IsHierarchyMode = true
             };
 
+            BeginRun();
             try
             {
                 // Find all PrefabInstance roots recursively
@@ -330,7 +365,7 @@ namespace SashaRX.PrefabDoctor
             }
             finally
             {
-                ClearSerializedObjectCache();
+                EndRun();
                 report.AnalysisTimeMs = sw.ElapsedMilliseconds;
             }
 
@@ -369,6 +404,7 @@ namespace SashaRX.PrefabDoctor
             GameObject root, AnalysisReport report, int batchSize = 500)
         {
             var sw = Stopwatch.StartNew();
+            BeginRun();
             report.AnalyzedRoot = root;
             report.Chain = BuildChain(root);
 
@@ -417,7 +453,7 @@ namespace SashaRX.PrefabDoctor
 
             report.IsComplete = true;
             report.AnalysisTimeMs = sw.ElapsedMilliseconds;
-            ClearSerializedObjectCache();
+            EndRun();
 
             yield return 1f;
         }
@@ -857,32 +893,27 @@ namespace SashaRX.PrefabDoctor
             return null;
         }
 
-        private static bool IsInternalProperty(string propertyPath)
+        private bool IsInternalProperty(string propertyPath)
         {
-            foreach (var prefix in s_InternalPrefixes)
-                if (propertyPath.StartsWith(prefix, StringComparison.Ordinal))
-                    return true;
-
-            var settings = PrefabDoctorSettings.GetOrCreateDefault();
-            if (settings.AdditionalIgnoredPrefixes != null)
+            // _runIgnoredPrefixes is the merged static + settings list, built
+            // once per run in BeginRun(). If a caller forgot to BeginRun, fall
+            // back to the static list so we stay correct.
+            var prefixes = _runIgnoredPrefixes ?? s_InternalPrefixes;
+            foreach (var prefix in prefixes)
             {
-                foreach (var prefix in settings.AdditionalIgnoredPrefixes)
-                {
-                    if (!string.IsNullOrEmpty(prefix) &&
-                        propertyPath.StartsWith(prefix, StringComparison.Ordinal))
-                        return true;
-                }
+                if (!string.IsNullOrEmpty(prefix) &&
+                    propertyPath.StartsWith(prefix, StringComparison.Ordinal))
+                    return true;
             }
-
             return false;
         }
 
-        private static bool IsIgnoredComponentType(string typeName)
+        private bool IsIgnoredComponentType(string typeName)
         {
-            var settings = PrefabDoctorSettings.GetOrCreateDefault();
-            if (settings.IgnoredComponentTypes == null) return false;
+            var types = _runIgnoredTypes;
+            if (types == null || types.Length == 0) return false;
 
-            foreach (var ignored in settings.IgnoredComponentTypes)
+            foreach (var ignored in types)
             {
                 if (!string.IsNullOrEmpty(ignored) && typeName == ignored)
                     return true;
