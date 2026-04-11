@@ -139,6 +139,33 @@ namespace SashaRX.PrefabDoctor
             List<NestingLevel> chain, Transform subtreeRoot = null)
         {
             var map = new Dictionary<PropertyKey, List<OverrideEntry>>();
+            // Drain the incremental form to completion — this is the sync
+            // wrapper that existing call sites (instance-mode analysis,
+            // unit tests) rely on.
+            foreach (var _ in CollectOverridesIncremental(chain, map, subtreeRoot, 0f)) { }
+            return map;
+        }
+
+        /// <summary>
+        /// Incremental override collection. Fills <paramref name="map"/> in
+        /// place and yields the <paramref name="progress"/> value every
+        /// <c>modBudgetPerYield</c> processed modifications so the caller
+        /// can keep the editor responsive even on prefab instances with
+        /// thousands of property modifications (network backing fields,
+        /// scene-level overrides, etc.).
+        ///
+        /// The yielded float is just a hint for the caller's progress bar;
+        /// the real signal is "we yielded" (giving the pump a chance to
+        /// breathe), not the numeric value.
+        /// </summary>
+        private IEnumerable<float> CollectOverridesIncremental(
+            List<NestingLevel> chain,
+            Dictionary<PropertyKey, List<OverrideEntry>> map,
+            Transform subtreeRoot,
+            float progress)
+        {
+            const int modBudgetPerYield = 200;
+            int modsSinceYield = 0;
 
             for (int i = 0; i < chain.Count; i++)
             {
@@ -152,41 +179,59 @@ namespace SashaRX.PrefabDoctor
 
                 foreach (var mod in mods)
                 {
-                    if (!IncludeDefaultOverrides && PrefabUtility.IsDefaultOverride(mod))
-                        continue;
+                    ProcessMod(mod, level, map, subtreeRoot);
 
-                    if (mod.target == null)
+                    if (++modsSinceYield >= modBudgetPerYield)
                     {
-                        var orphanKey = new PropertyKey
-                        {
-                            ComponentType = "MISSING",
-                            GameObjectPath = "?",
-                            PropertyPath = mod.propertyPath
-                        };
-                        AddToMap(map, orphanKey, level, mod);
-                        continue;
+                        modsSinceYield = 0;
+                        yield return progress;
                     }
-
-                    if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
-                        continue;
-
-                    // Skip ignored component types
-                    if (mod.target != null && IsIgnoredComponentType(mod.target.GetType().Name))
-                        continue;
-
-                    if (subtreeRoot != null)
-                    {
-                        var targetGO = GetGameObject(mod.target);
-                        if (targetGO != null && !targetGO.transform.IsChildOf(subtreeRoot))
-                            continue;
-                    }
-
-                    var key = MakeKey(mod);
-                    AddToMap(map, key, level, mod);
                 }
             }
+        }
 
-            return map;
+        /// <summary>
+        /// Classify a single <see cref="PropertyModification"/> and add it
+        /// to <paramref name="map"/>. Extracted from the old loop body so
+        /// the incremental collector can reuse it without duplicating the
+        /// orphan / internal / ignored-type filtering rules.
+        /// </summary>
+        private void ProcessMod(
+            PropertyModification mod,
+            NestingLevel level,
+            Dictionary<PropertyKey, List<OverrideEntry>> map,
+            Transform subtreeRoot)
+        {
+            if (!IncludeDefaultOverrides && PrefabUtility.IsDefaultOverride(mod))
+                return;
+
+            if (mod.target == null)
+            {
+                var orphanKey = new PropertyKey
+                {
+                    ComponentType = "MISSING",
+                    GameObjectPath = "?",
+                    PropertyPath = mod.propertyPath
+                };
+                AddToMap(map, orphanKey, level, mod);
+                return;
+            }
+
+            if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
+                return;
+
+            if (IsIgnoredComponentType(mod.target.GetType().Name))
+                return;
+
+            if (subtreeRoot != null)
+            {
+                var targetGO = GetGameObject(mod.target);
+                if (targetGO != null && !targetGO.transform.IsChildOf(subtreeRoot))
+                    return;
+            }
+
+            var key = MakeKey(mod);
+            AddToMap(map, key, level, mod);
         }
 
         private static void AddToMap(Dictionary<PropertyKey, List<OverrideEntry>> map,
@@ -349,8 +394,16 @@ namespace SashaRX.PrefabDoctor
                 var chain = BuildChain(instanceRoot);
                 if (chain.Count >= 2)
                 {
-                    var overrideMap = CollectOverrides(chain);
                     float progress = (float)idx / total;
+
+                    // Collect overrides incrementally — on scene instances
+                    // with thousands of network backing fields, even the
+                    // collection phase (per-mod PrefabUtility.IsDefaultOverride
+                    // calls) is enough to trigger Unity's 'Hold on' dialog
+                    // if we do it all in one go.
+                    var overrideMap = new Dictionary<PropertyKey, List<OverrideEntry>>();
+                    foreach (float p in CollectOverridesIncremental(chain, overrideMap, null, progress))
+                        yield return p;
 
                     // Scalar properties — classify and merge with hier-prefixed paths.
                     foreach (var kvp in overrideMap)
