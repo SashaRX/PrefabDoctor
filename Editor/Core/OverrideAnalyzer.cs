@@ -515,7 +515,12 @@ namespace SashaRX.PrefabDoctor
 
             if (allSame)
                 return new PropertyConflict
-                    { Key = qg.BaseKey, Severity = ConflictSeverity.Insignificant, Overrides = entries };
+                {
+                    Key = qg.BaseKey,
+                    Severity = ConflictSeverity.Insignificant,
+                    Category = CategorizeProperty(qg.BaseKey.PropertyPath),
+                    Overrides = entries
+                };
 
             // Ping-pong check
             for (int i = 0; i < depths.Count; i++)
@@ -530,15 +535,23 @@ namespace SashaRX.PrefabDoctor
                         if (Mathf.Abs(Quaternion.Dot(qi, qg.ValuesByDepth[depths[k]])) < dotThreshold)
                             return new PropertyConflict
                             {
-                                Key = qg.BaseKey, Severity = ConflictSeverity.PingPong,
-                                Overrides = entries, PingPongIndices = (i, k, j)
+                                Key = qg.BaseKey,
+                                Severity = ConflictSeverity.PingPong,
+                                Category = CategorizeProperty(qg.BaseKey.PropertyPath),
+                                Overrides = entries,
+                                PingPongIndices = (i, k, j)
                             };
                     }
                 }
             }
 
             return new PropertyConflict
-                { Key = qg.BaseKey, Severity = ConflictSeverity.MultiOverride, Overrides = entries };
+            {
+                Key = qg.BaseKey,
+                Severity = ConflictSeverity.MultiOverride,
+                Category = CategorizeProperty(qg.BaseKey.PropertyPath),
+                Overrides = entries
+            };
         }
 
         private static string FmtQ(Quaternion q) =>
@@ -546,10 +559,50 @@ namespace SashaRX.PrefabDoctor
 
         // ── Conflict Classification ────────────────────────────────
 
+        /// <summary>
+        /// Group a property by the kind of data it holds, independently of how
+        /// severe the override is. Used by the UI for per-category filtering
+        /// and status bar summaries.
+        /// </summary>
+        internal static OverrideCategory CategorizeProperty(string propertyPath)
+        {
+            if (string.IsNullOrEmpty(propertyPath)) return OverrideCategory.General;
+
+            // Lightmap noise
+            if (propertyPath == "m_ScaleInLightmap"
+                || propertyPath == "m_LightmapIndex"
+                || propertyPath.StartsWith("m_LightmapTilingOffset"))
+                return OverrideCategory.Lightmap;
+
+            // Network noise (Netcode for GameObjects and similar)
+            if (propertyPath == "WasActiveDuringEdit"
+                || propertyPath == "_initializedTimestamp"
+                || propertyPath == "_networkObjectCache"
+                || propertyPath.Contains("k__BackingField")
+                || propertyPath.StartsWith("NetworkBehaviours"))
+                return OverrideCategory.NetworkNoise;
+
+            if (propertyPath == "m_StaticEditorFlags") return OverrideCategory.StaticFlags;
+            if (propertyPath == "m_Name")              return OverrideCategory.Name;
+
+            if (propertyPath.StartsWith("m_LocalPosition")
+                || propertyPath.StartsWith("m_LocalRotation")
+                || propertyPath.StartsWith("m_LocalScale")
+                || propertyPath.StartsWith("m_LocalEulerAnglesHint"))
+                return OverrideCategory.Transform;
+
+            return OverrideCategory.General;
+        }
+
         private PropertyConflict ClassifyConflict(PropertyKey key,
             List<OverrideEntry> entries, List<NestingLevel> chain)
         {
-            var conflict = new PropertyConflict { Key = key, Overrides = entries };
+            var conflict = new PropertyConflict
+            {
+                Key = key,
+                Overrides = entries,
+                Category = CategorizeProperty(key.PropertyPath)
+            };
 
             if (key.ComponentType == "MISSING")
             {

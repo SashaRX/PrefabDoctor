@@ -70,12 +70,29 @@ namespace SashaRX.PrefabDoctor
     }
 
     /// <summary>
+    /// Semantic grouping of overridden properties. Severity tells how bad the
+    /// override is; Category tells what kind of data it is (lightmap noise,
+    /// network noise, transform, etc.) so the UI can filter/summarise it.
+    /// </summary>
+    internal enum OverrideCategory
+    {
+        General,
+        Transform,
+        Lightmap,
+        NetworkNoise,
+        StaticFlags,
+        Name,
+        Material
+    }
+
+    /// <summary>
     /// Full analysis result for one property across the entire nesting chain.
     /// </summary>
     internal class PropertyConflict
     {
         public PropertyKey Key;
         public ConflictSeverity Severity;
+        public OverrideCategory Category;
         public List<OverrideEntry> Overrides = new();
 
         /// <summary>

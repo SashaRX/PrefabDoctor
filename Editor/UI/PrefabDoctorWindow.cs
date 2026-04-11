@@ -57,7 +57,9 @@ namespace SashaRX.PrefabDoctor
             AllOverrides,
             PingPongOnly,
             OrphansOnly,
-            InsignificantOnly
+            InsignificantOnly,
+            LightmapOnly,
+            NetworkNoiseOnly
         }
 
         // ── Main Layout ────────────────────────────────────────────
@@ -258,6 +260,20 @@ namespace SashaRX.PrefabDoctor
             DrawBadge($"Insig:{_report.TotalInsignificant}", new Color(0.5f, 0.8f, 1f),
                 _report.TotalInsignificant > 0);
 
+            var catCounts = CountByCategory(_report);
+            GUILayout.Label("│", EditorStyles.miniLabel);
+            DrawBadge($"Lightmap:{catCounts[OverrideCategory.Lightmap]}",
+                new Color(1f, 0.9f, 0.3f), catCounts[OverrideCategory.Lightmap] > 0);
+            DrawBadge($"Net:{catCounts[OverrideCategory.NetworkNoise]}",
+                new Color(0.4f, 0.9f, 0.7f), catCounts[OverrideCategory.NetworkNoise] > 0);
+            DrawBadge($"Flags:{catCounts[OverrideCategory.StaticFlags]}",
+                new Color(0.8f, 0.7f, 1f), catCounts[OverrideCategory.StaticFlags] > 0);
+            int otherCount = catCounts[OverrideCategory.General]
+                + catCounts[OverrideCategory.Transform]
+                + catCounts[OverrideCategory.Name]
+                + catCounts[OverrideCategory.Material];
+            DrawBadge($"Other:{otherCount}", new Color(0.7f, 0.7f, 0.7f), otherCount > 0);
+
             GUILayout.Label($"  {_report.AnalysisTimeMs:F0}ms", EditorStyles.miniLabel);
 
             EditorGUILayout.EndHorizontal();
@@ -269,6 +285,24 @@ namespace SashaRX.PrefabDoctor
             GUI.contentColor = active ? color : new Color(0.5f, 0.5f, 0.5f);
             GUILayout.Label(text, EditorStyles.miniBoldLabel, GUILayout.ExpandWidth(false));
             GUI.contentColor = prevColor;
+        }
+
+        private static Dictionary<OverrideCategory, int> CountByCategory(AnalysisReport report)
+        {
+            var counts = new Dictionary<OverrideCategory, int>
+            {
+                [OverrideCategory.General] = 0,
+                [OverrideCategory.Transform] = 0,
+                [OverrideCategory.Lightmap] = 0,
+                [OverrideCategory.NetworkNoise] = 0,
+                [OverrideCategory.StaticFlags] = 0,
+                [OverrideCategory.Name] = 0,
+                [OverrideCategory.Material] = 0,
+            };
+            foreach (var go in report.GameObjects)
+            foreach (var c in go.Conflicts)
+                counts[c.Category]++;
+            return counts;
         }
 
         // ── Left Panel: GameObject Tree ────────────────────────────
@@ -678,6 +712,12 @@ namespace SashaRX.PrefabDoctor
                 FilterMode.ConflictsOnly => _report.GameObjects
                     .Where(g => g.PingPongCount > 0 || g.MultiOverrideCount > 0 ||
                                g.OrphanCount > 0).ToList(),
+                FilterMode.LightmapOnly => _report.GameObjects
+                    .Where(g => g.Conflicts.Any(c => c.Category == OverrideCategory.Lightmap))
+                    .ToList(),
+                FilterMode.NetworkNoiseOnly => _report.GameObjects
+                    .Where(g => g.Conflicts.Any(c => c.Category == OverrideCategory.NetworkNoise))
+                    .ToList(),
                 _ => _report.GameObjects
             };
         }
@@ -690,6 +730,8 @@ namespace SashaRX.PrefabDoctor
                 FilterMode.OrphansOnly => conflict.Severity == ConflictSeverity.Orphan,
                 FilterMode.InsignificantOnly => conflict.Severity == ConflictSeverity.Insignificant,
                 FilterMode.ConflictsOnly => conflict.Severity != ConflictSeverity.Insignificant,
+                FilterMode.LightmapOnly => conflict.Category == OverrideCategory.Lightmap,
+                FilterMode.NetworkNoiseOnly => conflict.Category == OverrideCategory.NetworkNoise,
                 _ => true
             };
         }
