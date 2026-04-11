@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -19,6 +20,17 @@ namespace SashaRX.PrefabDoctor
     /// </summary>
     internal static class OverrideReportFormatter
     {
+        // Hard caps for clipboard-friendly reports. A real scene hierarchy
+        // can easily produce 300k+ orphan conflicts, which turns a naive
+        // full dump into a 40MB markdown file that nobody can paste into
+        // a chat or bug tracker. We emit a bounded report instead: first
+        // N entries per severity + aggregated top-K summaries for Orphan,
+        // and a pure count for Insignificant.
+        private const int k_MaxPingPongEntries      = 200;
+        private const int k_MaxMultiOverrideEntries = 200;
+        private const int k_MaxOrphanEntries        = 50;
+        private const int k_OrphanTopProperties     = 20;
+
         public static string ToMarkdown(AnalysisReport report)
         {
             if (report == null)
@@ -28,9 +40,11 @@ namespace SashaRX.PrefabDoctor
 
             AppendHeader(sb, report);
             AppendSummary(sb, report);
-            AppendSeverityBlock(sb, report, ConflictSeverity.PingPong,      "PingPong");
-            AppendSeverityBlock(sb, report, ConflictSeverity.MultiOverride, "MultiOverride");
-            AppendSeverityBlock(sb, report, ConflictSeverity.Orphan,        "Orphan");
+            AppendSeverityBlock(sb, report, ConflictSeverity.PingPong,
+                "PingPong", k_MaxPingPongEntries);
+            AppendSeverityBlock(sb, report, ConflictSeverity.MultiOverride,
+                "MultiOverride", k_MaxMultiOverrideEntries);
+            AppendOrphanBlock(sb, report);
             AppendInsignificantNote(sb, report);
 
             return sb.ToString();
@@ -107,7 +121,8 @@ namespace SashaRX.PrefabDoctor
         }
 
         private static void AppendSeverityBlock(
-            StringBuilder sb, AnalysisReport r, ConflictSeverity severity, string title)
+            StringBuilder sb, AnalysisReport r, ConflictSeverity severity,
+            string title, int maxEntries)
         {
             int count = severity switch
             {
@@ -120,12 +135,75 @@ namespace SashaRX.PrefabDoctor
 
             sb.Append("## ").Append(title).Append(" (").Append(count).Append(")\n\n");
 
+            int emitted = 0;
             foreach (var go in r.GameObjects)
             {
+                if (emitted >= maxEntries) break;
                 foreach (var conflict in go.Conflicts)
                 {
                     if (conflict.Severity != severity) continue;
                     AppendConflict(sb, go, conflict);
+                    if (++emitted >= maxEntries) break;
+                }
+            }
+
+            if (emitted < count)
+            {
+                sb.Append("_…and ").Append(count - emitted)
+                  .Append(" more ").Append(title).Append(" entries not listed._\n\n");
+            }
+        }
+
+        /// <summary>
+        /// Orphans are usually dominated by a handful of removed components
+        /// repeated across thousands of prefab instances. Instead of dumping
+        /// every entry (which on a real scene means 300k+ rows), emit a
+        /// histogram of the most common (ComponentType, PropertyPath) pairs
+        /// followed by a small sample of full entries.
+        /// </summary>
+        private static void AppendOrphanBlock(StringBuilder sb, AnalysisReport r)
+        {
+            if (r.TotalOrphan == 0) return;
+
+            sb.Append("## Orphan (").Append(r.TotalOrphan).Append(")\n\n");
+
+            // Histogram by (ComponentType, PropertyPath). ComponentType is
+            // always "MISSING" for true orphans, but PropertyPath varies.
+            var histogram = new Dictionary<string, int>();
+            foreach (var go in r.GameObjects)
+            foreach (var c in go.Conflicts)
+            {
+                if (c.Severity != ConflictSeverity.Orphan) continue;
+                string key = c.Key.PropertyPath ?? "(null)";
+                histogram.TryGetValue(key, out int n);
+                histogram[key] = n + 1;
+            }
+
+            if (histogram.Count > 0)
+            {
+                sb.Append("Top property paths (orphan count):\n\n");
+                var top = new List<KeyValuePair<string, int>>(histogram);
+                top.Sort(static (a, b) => b.Value.CompareTo(a.Value));
+
+                int shown = Math.Min(top.Count, k_OrphanTopProperties);
+                for (int i = 0; i < shown; i++)
+                    sb.Append("- `").Append(top[i].Key).Append("` × ")
+                      .Append(top[i].Value).Append('\n');
+                sb.Append('\n');
+            }
+
+            // A small sample of individual entries — useful when the user
+            // needs to see a specific path and fix it manually.
+            sb.Append("Sample entries (first ").Append(k_MaxOrphanEntries).Append("):\n\n");
+            int emitted = 0;
+            foreach (var go in r.GameObjects)
+            {
+                if (emitted >= k_MaxOrphanEntries) break;
+                foreach (var conflict in go.Conflicts)
+                {
+                    if (conflict.Severity != ConflictSeverity.Orphan) continue;
+                    AppendConflict(sb, go, conflict);
+                    if (++emitted >= k_MaxOrphanEntries) break;
                 }
             }
         }
@@ -159,17 +237,34 @@ namespace SashaRX.PrefabDoctor
                 }
 
                 sb.Append("- Values by depth:\n");
-                foreach (var e in sorted)
+                // Collapse runs of identical (depth, value) entries —
+                // orphan merging in CollectOverrides can produce dozens
+                // of duplicate rows in one conflict, and dumping each
+                // one is useless noise.
+                int i = 0;
+                while (i < sorted.Count)
                 {
-                    sb.Append("  - depth ").Append(e.Depth);
-                    sb.Append(" (`").Append(ShortAssetName(e.AssetPath)).Append("`): `");
-                    sb.Append(e.Value ?? "(null)").Append('`');
+                    var head = sorted[i];
+                    int run = 1;
+                    while (i + run < sorted.Count
+                           && sorted[i + run].Depth == head.Depth
+                           && string.Equals(sorted[i + run].Value, head.Value,
+                                            StringComparison.Ordinal))
+                    {
+                        run++;
+                    }
 
-                    if (e.Depth == firstDepth)         sb.Append(" ← first");
-                    else if (e.Depth == middleDepth)   sb.Append(" ← middle");
-                    else if (e.Depth == pingBackDepth) sb.Append(" ← pingBack");
+                    sb.Append("  - depth ").Append(head.Depth);
+                    sb.Append(" (`").Append(ShortAssetName(head.AssetPath)).Append("`): `");
+                    sb.Append(head.Value ?? "(null)").Append('`');
+                    if (run > 1) sb.Append(" × ").Append(run);
+
+                    if (head.Depth == firstDepth)         sb.Append(" ← first");
+                    else if (head.Depth == middleDepth)   sb.Append(" ← middle");
+                    else if (head.Depth == pingBackDepth) sb.Append(" ← pingBack");
 
                     sb.Append('\n');
+                    i += run;
                 }
 
                 if (c.Severity == ConflictSeverity.PingPong)
