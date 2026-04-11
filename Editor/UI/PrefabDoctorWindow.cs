@@ -65,6 +65,21 @@ namespace SashaRX.PrefabDoctor
         private AnalysisReport _filteredGOCacheReport;
         private FilterMode _filteredGOCacheMode;
 
+        // Cached category counts — CountByCategory iterates every conflict
+        // in every GameObjectReport, which on a hierarchy run with 300k+
+        // objects turns into millions of operations per Repaint if invoked
+        // from DrawStatusBar unconditionally. Invalidated on report change.
+        private Dictionary<OverrideCategory, int> _categoryCountsCache;
+        private AnalysisReport _categoryCountsCacheReport;
+
+        // Hard render caps for IMGUI. IMGUI has no built-in virtualization
+        // so every row drawn runs a full layout pass; at 300k rows the
+        // window freezes at ~0.5 fps even when the report itself is done.
+        // A future UI Toolkit port (see UI_TOOLKIT_MIGRATION.md) will use
+        // MultiColumnListView and these caps become unnecessary.
+        private const int k_MaxVisibleGOs = 500;
+        private const int k_MaxVisibleConflicts = 500;
+
         private enum FilterMode
         {
             ConflictsOnly,
@@ -281,7 +296,7 @@ namespace SashaRX.PrefabDoctor
             DrawBadge($"Insig:{_report.TotalInsignificant}", new Color(0.5f, 0.8f, 1f),
                 _report.TotalInsignificant > 0);
 
-            var catCounts = CountByCategory(_report);
+            var catCounts = GetCategoryCounts();
             GUILayout.Label("│", EditorStyles.miniLabel);
             DrawBadge($"Lightmap:{catCounts[OverrideCategory.Lightmap]}",
                 new Color(1f, 0.9f, 0.3f), catCounts[OverrideCategory.Lightmap] > 0);
@@ -308,6 +323,36 @@ namespace SashaRX.PrefabDoctor
             GUI.contentColor = prevColor;
         }
 
+        private Dictionary<OverrideCategory, int> GetCategoryCounts()
+        {
+            if (ReferenceEquals(_categoryCountsCacheReport, _report)
+                && _categoryCountsCache != null)
+            {
+                return _categoryCountsCache;
+            }
+
+            var counts = new Dictionary<OverrideCategory, int>
+            {
+                [OverrideCategory.General] = 0,
+                [OverrideCategory.Transform] = 0,
+                [OverrideCategory.Lightmap] = 0,
+                [OverrideCategory.NetworkNoise] = 0,
+                [OverrideCategory.StaticFlags] = 0,
+                [OverrideCategory.Name] = 0,
+                [OverrideCategory.Material] = 0,
+            };
+            if (_report != null)
+            {
+                foreach (var go in _report.GameObjects)
+                foreach (var c in go.Conflicts)
+                    counts[c.Category]++;
+            }
+
+            _categoryCountsCache = counts;
+            _categoryCountsCacheReport = _report;
+            return counts;
+        }
+
         private static Dictionary<OverrideCategory, int> CountByCategory(AnalysisReport report)
         {
             var counts = new Dictionary<OverrideCategory, int>
@@ -331,8 +376,9 @@ namespace SashaRX.PrefabDoctor
         private void DrawGameObjectList()
         {
             var filteredGOs = GetFilteredGameObjects();
+            int visibleCount = Mathf.Min(filteredGOs.Count, k_MaxVisibleGOs);
 
-            for (int i = 0; i < filteredGOs.Count; i++)
+            for (int i = 0; i < visibleCount; i++)
             {
                 var goReport = filteredGOs[i];
                 bool selected = _selectedGoIndex == i;
@@ -370,6 +416,16 @@ namespace SashaRX.PrefabDoctor
                 GUILayout.Label(counts, EditorStyles.miniLabel);
 
                 EditorGUILayout.EndHorizontal();
+            }
+
+            if (filteredGOs.Count > visibleCount)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.HelpBox(
+                    $"Showing first {visibleCount} of {filteredGOs.Count} GameObjects.\n"
+                    + "Narrow the filter (PingPongOnly / MultiOverrideOnly / a category) "
+                    + "to see fewer rows, or use Copy Report for the full list.",
+                    MessageType.Info);
             }
         }
 
@@ -433,13 +489,24 @@ namespace SashaRX.PrefabDoctor
             GUILayout.Label("Values by depth", EditorStyles.miniBoldLabel);
             EditorGUILayout.EndHorizontal();
 
-            // Rows
+            // Rows — capped at k_MaxVisibleConflicts to keep IMGUI layout
+            // fast on hierarchy reports with tens of thousands of rows on
+            // a single selected GameObject.
+            int drawn = 0;
+            int hiddenByCap = 0;
             for (int i = 0; i < goReport.Conflicts.Count; i++)
             {
                 var conflict = goReport.Conflicts[i];
 
                 // Apply filter mode
                 if (!PassesFilter(conflict)) continue;
+
+                if (drawn >= k_MaxVisibleConflicts)
+                {
+                    hiddenByCap++;
+                    continue;
+                }
+                drawn++;
 
                 Color rowColor = conflict.Severity switch
                 {
@@ -497,6 +564,16 @@ namespace SashaRX.PrefabDoctor
                     ShowConflictContextMenu(conflict, i, goReport);
                     Event.current.Use();
                 }
+            }
+
+            if (hiddenByCap > 0)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.HelpBox(
+                    $"Showing first {drawn} of {drawn + hiddenByCap} matching conflicts.\n"
+                    + "Narrow the filter (PingPongOnly / a category) to see fewer rows, "
+                    + "or use Copy Report for the full list.",
+                    MessageType.Info);
             }
         }
 
@@ -680,10 +757,16 @@ namespace SashaRX.PrefabDoctor
                     _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
                     _selectedConflicts.Clear();
 
-                    // Hierarchy mode treats insignificant/noise as primary
-                    // output — the default ConflictsOnly filter hides most
-                    // of the signal here.
-                    _filterMode = FilterMode.AllOverrides;
+                    // On a hierarchy run, the most actionable items are
+                    // ping-pong patterns (rare, always bugs) and
+                    // MultiOverride (design-smell). The noise categories
+                    // (Orphan / Lightmap / NetworkNoise) can easily be in
+                    // the hundreds of thousands and drown everything
+                    // useful if the default filter is "All". Start
+                    // narrow and let the user widen via the dropdown.
+                    _filterMode = _report.TotalPingPong > 0
+                        ? FilterMode.PingPongOnly
+                        : FilterMode.ConflictsOnly;
 
                     _hierarchyJob = null;
                     _pendingHierarchyReport = null;
