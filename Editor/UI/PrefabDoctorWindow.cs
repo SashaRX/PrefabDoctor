@@ -51,6 +51,13 @@ namespace SashaRX.PrefabDoctor
         private Exception _lastDrawError;
         private bool _loggedDrawError;
 
+        // Cached filtered GameObject view. OnGUI can run many times per
+        // second; without this cache each repaint re-walks the report and
+        // allocates a fresh List via LINQ Where().ToList().
+        private List<GameObjectReport> _filteredGOCache;
+        private AnalysisReport _filteredGOCacheReport;
+        private FilterMode _filteredGOCacheMode;
+
         private enum FilterMode
         {
             ConflictsOnly,
@@ -704,25 +711,60 @@ namespace SashaRX.PrefabDoctor
         {
             if (_report == null) return new List<GameObjectReport>();
 
-            return _filterMode switch
+            // Reference-equality compare: report is never mutated once built,
+            // so if we're still looking at the same AnalysisReport instance
+            // with the same FilterMode, the filtered list can't have changed.
+            if (ReferenceEquals(_filteredGOCacheReport, _report)
+                && _filteredGOCacheMode == _filterMode
+                && _filteredGOCache != null)
             {
-                FilterMode.PingPongOnly => _report.GameObjects
-                    .Where(g => g.PingPongCount > 0).ToList(),
-                FilterMode.OrphansOnly => _report.GameObjects
-                    .Where(g => g.OrphanCount > 0).ToList(),
-                FilterMode.InsignificantOnly => _report.GameObjects
-                    .Where(g => g.InsignificantCount > 0).ToList(),
-                FilterMode.ConflictsOnly => _report.GameObjects
-                    .Where(g => g.PingPongCount > 0 || g.MultiOverrideCount > 0 ||
-                               g.OrphanCount > 0).ToList(),
-                FilterMode.LightmapOnly => _report.GameObjects
-                    .Where(g => g.Conflicts.Any(c => c.Category == OverrideCategory.Lightmap))
-                    .ToList(),
-                FilterMode.NetworkNoiseOnly => _report.GameObjects
-                    .Where(g => g.Conflicts.Any(c => c.Category == OverrideCategory.NetworkNoise))
-                    .ToList(),
+                return _filteredGOCache;
+            }
+
+            List<GameObjectReport> result = _filterMode switch
+            {
+                FilterMode.PingPongOnly => FilterGameObjects(static g => g.PingPongCount > 0),
+                FilterMode.OrphansOnly => FilterGameObjects(static g => g.OrphanCount > 0),
+                FilterMode.InsignificantOnly => FilterGameObjects(static g => g.InsignificantCount > 0),
+                FilterMode.ConflictsOnly => FilterGameObjects(static g =>
+                    g.PingPongCount > 0 || g.MultiOverrideCount > 0 || g.OrphanCount > 0),
+                FilterMode.LightmapOnly => FilterByCategory(OverrideCategory.Lightmap),
+                FilterMode.NetworkNoiseOnly => FilterByCategory(OverrideCategory.NetworkNoise),
                 _ => _report.GameObjects
             };
+
+            _filteredGOCache = result;
+            _filteredGOCacheReport = _report;
+            _filteredGOCacheMode = _filterMode;
+            return result;
+        }
+
+        private List<GameObjectReport> FilterGameObjects(Func<GameObjectReport, bool> predicate)
+        {
+            var src = _report.GameObjects;
+            var dst = new List<GameObjectReport>(src.Count);
+            for (int i = 0; i < src.Count; i++)
+                if (predicate(src[i])) dst.Add(src[i]);
+            return dst;
+        }
+
+        private List<GameObjectReport> FilterByCategory(OverrideCategory category)
+        {
+            var src = _report.GameObjects;
+            var dst = new List<GameObjectReport>(src.Count);
+            for (int i = 0; i < src.Count; i++)
+            {
+                var conflicts = src[i].Conflicts;
+                for (int c = 0; c < conflicts.Count; c++)
+                {
+                    if (conflicts[c].Category == category)
+                    {
+                        dst.Add(src[i]);
+                        break;
+                    }
+                }
+            }
+            return dst;
         }
 
         private bool PassesFilter(PropertyConflict conflict)
