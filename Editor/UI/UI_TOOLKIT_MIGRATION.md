@@ -7,12 +7,10 @@ the runtime minimum can be raised deliberately.
 
 ## Unity version baseline
 
-- `package.json` currently declares `"unity": "2021.3"`.
-- Several of the APIs below **require 2022.2+ or 2023.1+**. If we want them,
-  the package minimum must be bumped. The table at the end summarises this.
-- Unity 6 (6000.x LTS) ships all of these features and fixes numerous UI
-  Toolkit layout bugs, so it is the recommended target if we commit to the
-  port.
+- `package.json` declares `"unity": "6000.0"` — Unity 6 is the minimum.
+- Every UI Toolkit API referenced below is available on Unity 6, including
+  `MultiColumnListView` (the headline virtualization win). No version gaps
+  remain and no runtime shims are needed.
 
 ## Lifecycle: `CreateGUI()` vs `OnGUI()`
 
@@ -107,8 +105,8 @@ columns["category"].bindCell  = (el, i) => ((Label)el).text =
 rightPane.Add(table);
 ```
 
-**Requires Unity 2022.2+.** This is the single biggest reason to bump the
-minimum.
+`MultiColumnListView` is available on Unity 6 with no caveats — this is the
+single biggest reason the package minimum was set to `6000.0`.
 
 ## `ListView` — virtualized GameObject tree on the left
 
@@ -129,8 +127,7 @@ goList.selectionChanged += objs => OnGameObjectSelected(goList.selectedIndex);
 leftPane.Add(goList);
 ```
 
-Available since 2020.1; `selectionChanged` (plural) since 2022.2 (older versions
-use `onSelectionChange`).
+`ListView.selectionChanged` (plural) is the canonical event on Unity 6.
 
 ## Toolbar components
 
@@ -156,7 +153,7 @@ toolbar.Add(new ToolbarSpacer { flex = true });
 toolbar.Add(defaultsToggle);
 ```
 
-Available since 2019.1. No version concerns.
+Available on Unity 6 with no concerns.
 
 ## `ProgressBar` — replace `EditorUtility.DisplayProgressBar`
 
@@ -178,8 +175,6 @@ This only works if analysis is incremental (we already have
 `_incrementalJob` in the instance-analysis path). Hierarchy analysis would
 need to be made incremental before this helps — that's a future refactor, not
 part of this migration doc.
-
-Available since 2020.1.
 
 ## USS theme variables
 
@@ -203,7 +198,7 @@ theme automatically. This replaces manual `EditorStyles.miniLabel` /
 .prefab-doctor-badge--pingpong { color: var(--unity-colors-error-text); }
 ```
 
-USS variable names: 2021.2+. Older versions require manual color hex values.
+Unity 6 ships the full set of `var(--unity-*)` theme tokens.
 
 ## `SerializedObject` binding
 
@@ -238,30 +233,17 @@ conflictRow.AddManipulator(new ContextualMenuManipulator(ev =>
 }));
 ```
 
-Available since 2019.1. Works with `MultiColumnListView` via the row
-`bindCell` callback (attach manipulator per-row).
+Works with `MultiColumnListView` via the row `bindCell` callback (attach the
+manipulator per-row).
 
-## Version requirement summary
+## Version status
 
-| Feature                 | Minimum Unity     | Notes                                    |
-|-------------------------|-------------------|------------------------------------------|
-| `CreateGUI`             | 2020.1            | Safe on 2021.3                           |
-| `TwoPaneSplitView`      | 2021.2            | Safe on 2021.3                           |
-| `ListView`              | 2020.1            | Safe on 2021.3 (old selection API)       |
-| `ListView.selectionChanged` (plural) | 2022.2 | Need shim on 2021.3                   |
-| **`MultiColumnListView`** | **2022.2**      | **Not available on 2021.3**              |
-| `ToolbarMenu` / `ToolbarButton` / `ToolbarToggle` | 2019.1 | Safe |
-| `ProgressBar`           | 2020.1            | Safe                                     |
-| USS `var(--unity-*)`    | 2021.2            | Safe on 2021.3                           |
-| `ContextualMenuManipulator` | 2019.1        | Safe                                     |
-
-**Blocker:** `MultiColumnListView` is the headline win (virtualization of the
-conflict table) and requires **Unity 2022.2 minimum**. Unity 6 is the safer
-target — it also gives us the mature fixes to `ListView` drag/reorder and the
-newer USS parser. Recommend bumping `package.json` `"unity"` to `"2022.3"` at
-minimum, `"6000.0"` if we can afford to drop older editors. This decision is
-out of scope for the current stabilization pass and must be made before the
-port starts.
+Package minimum is `"unity": "6000.0"`. Every API catalogued above
+(`CreateGUI`, `TwoPaneSplitView`, `ListView`, `MultiColumnListView`, toolbar
+components, `ProgressBar`, USS theme variables, `ContextualMenuManipulator`)
+is first-class on Unity 6. No shims, no fallbacks, no conditional compilation
+required. The port can proceed in a single pass whenever we decide to start
+it.
 
 ## What this does NOT cover
 
