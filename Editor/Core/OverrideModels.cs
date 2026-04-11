@@ -30,26 +30,33 @@ namespace SashaRX.PrefabDoctor
 
     /// <summary>
     /// Canonical identifier for a property across nesting levels.
-    /// ComponentType + ComponentName + PropertyPath uniquely identifies
-    /// "the same" property regardless of which depth we're looking at.
+    /// (ComponentType, GameObjectPath, PropertyPath) alone is not enough:
+    /// a single GameObject can host several components of the same type
+    /// (e.g. multiple FishNet NetworkBehaviours whose base class name
+    /// collides), and those would otherwise merge into one PropertyConflict
+    /// with parallel OverrideEntries at the same depth. TargetInstanceId
+    /// breaks that tie — it is NOT part of DisplayName so the user-facing
+    /// label still reads cleanly.
     /// </summary>
     internal struct PropertyKey
     {
         public string ComponentType;
         public string GameObjectPath; // relative path within prefab
         public string PropertyPath;
+        public int TargetInstanceId;  // disambiguates same-typed sibling components
 
         public string DisplayName =>
             $"{GameObjectPath}/{ComponentType}::{PropertyPath}";
 
         public override int GetHashCode() =>
-            (ComponentType, GameObjectPath, PropertyPath).GetHashCode();
+            (ComponentType, GameObjectPath, PropertyPath, TargetInstanceId).GetHashCode();
 
         public override bool Equals(object obj) =>
             obj is PropertyKey other &&
             ComponentType == other.ComponentType &&
             GameObjectPath == other.GameObjectPath &&
-            PropertyPath == other.PropertyPath;
+            PropertyPath == other.PropertyPath &&
+            TargetInstanceId == other.TargetInstanceId;
 
         public override string ToString() => DisplayName;
     }

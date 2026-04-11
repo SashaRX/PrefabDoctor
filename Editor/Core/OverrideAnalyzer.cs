@@ -207,11 +207,17 @@ namespace SashaRX.PrefabDoctor
 
             if (mod.target == null)
             {
+                // Orphans from different removed components all have
+                // target == null, so we cannot get a sibling-distinguishing
+                // InstanceID. Leave TargetInstanceId = 0; the formatter's
+                // (depth, value) run-length collapse handles the resulting
+                // duplicates on the display side.
                 var orphanKey = new PropertyKey
                 {
                     ComponentType = "MISSING",
                     GameObjectPath = "?",
-                    PropertyPath = mod.propertyPath
+                    PropertyPath = mod.propertyPath,
+                    TargetInstanceId = 0
                 };
                 AddToMap(map, orphanKey, level, mod);
                 return;
@@ -417,7 +423,8 @@ namespace SashaRX.PrefabDoctor
                             GameObjectPath = hierPath.Length > 0
                                 ? $"{hierPath}/{kvp.Key.GameObjectPath}"
                                 : kvp.Key.GameObjectPath,
-                            PropertyPath = kvp.Key.PropertyPath
+                            PropertyPath = kvp.Key.PropertyPath,
+                            TargetInstanceId = kvp.Key.TargetInstanceId
                         };
 
                         var conflict = ClassifyConflict(prefixedKey, kvp.Value, chain);
@@ -441,7 +448,8 @@ namespace SashaRX.PrefabDoctor
                             GameObjectPath = hierPath.Length > 0
                                 ? $"{hierPath}/{qg.BaseKey.GameObjectPath}"
                                 : qg.BaseKey.GameObjectPath,
-                            PropertyPath = qg.BaseKey.PropertyPath
+                            PropertyPath = qg.BaseKey.PropertyPath,
+                            TargetInstanceId = qg.BaseKey.TargetInstanceId
                         };
 
                         var prefixedQg = new QuaternionGroup
@@ -637,7 +645,12 @@ namespace SashaRX.PrefabDoctor
                     {
                         ComponentType = kvp.Key.compType,
                         GameObjectPath = kvp.Key.goPath,
-                        PropertyPath = "m_LocalRotation [Q]"
+                        PropertyPath = "m_LocalRotation [Q]",
+                        // Quaternion groups are synthetic aggregations of
+                        // four axis mods whose individual TargetInstanceIds
+                        // may differ. Transforms only ever have one rotation
+                        // per GO so collisions are not a concern here.
+                        TargetInstanceId = 0
                     },
                     ValuesByDepth = new Dictionary<int, Quaternion>(),
                     AssetPathsByDepth = paths[kvp.Key]
@@ -1039,7 +1052,13 @@ namespace SashaRX.PrefabDoctor
             {
                 ComponentType = mod.target != null ? mod.target.GetType().Name : "Unknown",
                 GameObjectPath = GetRelativePath(mod.target),
-                PropertyPath = mod.propertyPath
+                PropertyPath = mod.propertyPath,
+                // Disambiguate sibling components that share a type name —
+                // e.g. a GameObject hosting multiple NetworkBehaviour
+                // subclasses all reported as the same GetType().Name — so
+                // their parallel overrides don't merge into one bogus
+                // MultiOverride conflict with duplicate same-depth entries.
+                TargetInstanceId = mod.target != null ? mod.target.GetInstanceID() : 0
             };
         }
 
