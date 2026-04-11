@@ -19,20 +19,24 @@ namespace SashaRX.PrefabDoctor
         {
             Undo.SetCurrentGroupName($"Prefab Doctor: Keep at depth {keepDepth}");
             int group = Undo.GetCurrentGroup();
-
-            var chain = new OverrideAnalyzer().BuildChain(root);
-
-            foreach (var entry in conflict.Overrides)
+            try
             {
-                if (entry.Depth == keepDepth) continue;
+                var chain = new OverrideAnalyzer().BuildChain(root);
 
-                var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
-                if (level.Root == null) continue;
+                foreach (var entry in conflict.Overrides)
+                {
+                    if (entry.Depth == keepDepth) continue;
 
-                RemoveModification(level.Root, conflict.Key.PropertyPath, conflict.Key.ComponentType);
+                    var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
+                    if (level.Root == null) continue;
+
+                    RemoveModification(level.Root, conflict.Key.PropertyPath, conflict.Key.ComponentType);
+                }
             }
-
-            Undo.CollapseUndoOperations(group);
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
         }
 
         /// <summary>
@@ -42,18 +46,22 @@ namespace SashaRX.PrefabDoctor
         {
             Undo.SetCurrentGroupName("Prefab Doctor: Revert all");
             int group = Undo.GetCurrentGroup();
-
-            var chain = new OverrideAnalyzer().BuildChain(root);
-
-            foreach (var entry in conflict.Overrides)
+            try
             {
-                var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
-                if (level.Root == null) continue;
+                var chain = new OverrideAnalyzer().BuildChain(root);
 
-                RemoveModification(level.Root, conflict.Key.PropertyPath, conflict.Key.ComponentType);
+                foreach (var entry in conflict.Overrides)
+                {
+                    var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
+                    if (level.Root == null) continue;
+
+                    RemoveModification(level.Root, conflict.Key.PropertyPath, conflict.Key.ComponentType);
+                }
             }
-
-            Undo.CollapseUndoOperations(group);
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
         }
 
         /// <summary>
@@ -63,22 +71,27 @@ namespace SashaRX.PrefabDoctor
         {
             Undo.SetCurrentGroupName("Prefab Doctor: Clean orphans");
             int group = Undo.GetCurrentGroup();
-
-            var mods = PrefabUtility.GetPropertyModifications(root);
-            if (mods == null) return 0;
-
-            Undo.RecordObject(root, "Clean orphans");
-
-            var clean = mods.Where(m => m.target != null).ToArray();
-            int removed = mods.Length - clean.Length;
-
-            if (removed > 0)
+            try
             {
-                PrefabUtility.SetPropertyModifications(root, clean);
-            }
+                var mods = PrefabUtility.GetPropertyModifications(root);
+                if (mods == null) return 0;
 
-            Undo.CollapseUndoOperations(group);
-            return removed;
+                Undo.RecordObject(root, "Clean orphans");
+
+                var clean = mods.Where(m => m.target != null).ToArray();
+                int removed = mods.Length - clean.Length;
+
+                if (removed > 0)
+                {
+                    PrefabUtility.SetPropertyModifications(root, clean);
+                }
+
+                return removed;
+            }
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
         }
 
         /// <summary>
@@ -91,64 +104,70 @@ namespace SashaRX.PrefabDoctor
             int group = Undo.GetCurrentGroup();
             int totalRemoved = 0;
 
-            foreach (var level in chain)
+            try
             {
-                if (level.IsSceneInstance) continue;
-                if (level.Root == null) continue;
-
-                var mods = PrefabUtility.GetPropertyModifications(level.Root);
-                if (mods == null) continue;
-
-                var source = PrefabUtility.GetCorrespondingObjectFromSource(level.Root);
-                if (source == null) continue;
-
-                var keep = new List<PropertyModification>();
-                int removed = 0;
-
-                foreach (var mod in mods)
+                foreach (var level in chain)
                 {
-                    if (mod.target == null || PrefabUtility.IsDefaultOverride(mod))
+                    if (level.IsSceneInstance) continue;
+                    if (level.Root == null) continue;
+
+                    var mods = PrefabUtility.GetPropertyModifications(level.Root);
+                    if (mods == null) continue;
+
+                    var source = PrefabUtility.GetCorrespondingObjectFromSource(level.Root);
+                    if (source == null) continue;
+
+                    var keep = new List<PropertyModification>();
+                    int removed = 0;
+
+                    foreach (var mod in mods)
                     {
-                        keep.Add(mod);
-                        continue;
+                        if (mod.target == null || PrefabUtility.IsDefaultOverride(mod))
+                        {
+                            keep.Add(mod);
+                            continue;
+                        }
+
+                        // Find corresponding property on source to compare values
+                        var sourceObj = FindSourceObject(mod.target, source);
+                        if (sourceObj == null)
+                        {
+                            keep.Add(mod);
+                            continue;
+                        }
+
+                        string sourceValue = GetSourcePropertyValue(sourceObj, mod.propertyPath);
+                        if (sourceValue == null)
+                        {
+                            keep.Add(mod);
+                            continue;
+                        }
+
+                        var comparer = ComparerRouter.GetComparer(mod.propertyPath);
+                        if (comparer.AreEffectivelyEqual(mod.value, sourceValue))
+                        {
+                            removed++;
+                        }
+                        else
+                        {
+                            keep.Add(mod);
+                        }
                     }
 
-                    // Find corresponding property on source to compare values
-                    var sourceObj = FindSourceObject(mod.target, source);
-                    if (sourceObj == null)
+                    if (removed > 0)
                     {
-                        keep.Add(mod);
-                        continue;
-                    }
-
-                    string sourceValue = GetSourcePropertyValue(sourceObj, mod.propertyPath);
-                    if (sourceValue == null)
-                    {
-                        keep.Add(mod);
-                        continue;
-                    }
-
-                    var comparer = ComparerRouter.GetComparer(mod.propertyPath);
-                    if (comparer.AreEffectivelyEqual(mod.value, sourceValue))
-                    {
-                        removed++;
-                    }
-                    else
-                    {
-                        keep.Add(mod);
+                        Undo.RecordObject(level.Root, "Clean insignificant");
+                        PrefabUtility.SetPropertyModifications(level.Root, keep.ToArray());
+                        totalRemoved += removed;
                     }
                 }
 
-                if (removed > 0)
-                {
-                    Undo.RecordObject(level.Root, "Clean insignificant");
-                    PrefabUtility.SetPropertyModifications(level.Root, keep.ToArray());
-                    totalRemoved += removed;
-                }
+                return totalRemoved;
             }
-
-            Undo.CollapseUndoOperations(group);
-            return totalRemoved;
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
         }
 
         /// <summary>
@@ -158,22 +177,26 @@ namespace SashaRX.PrefabDoctor
         {
             Undo.SetCurrentGroupName("Prefab Doctor: Batch revert");
             int group = Undo.GetCurrentGroup();
-
-            var chain = new OverrideAnalyzer().BuildChain(root);
-
-            foreach (var conflict in conflicts)
+            try
             {
-                foreach (var entry in conflict.Overrides)
-                {
-                    var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
-                    if (level.Root == null) continue;
+                var chain = new OverrideAnalyzer().BuildChain(root);
 
-                    RemoveModification(level.Root, conflict.Key.PropertyPath,
-                        conflict.Key.ComponentType);
+                foreach (var conflict in conflicts)
+                {
+                    foreach (var entry in conflict.Overrides)
+                    {
+                        var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
+                        if (level.Root == null) continue;
+
+                        RemoveModification(level.Root, conflict.Key.PropertyPath,
+                            conflict.Key.ComponentType);
+                    }
                 }
             }
-
-            Undo.CollapseUndoOperations(group);
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
         }
 
         // ── Internal helpers ───────────────────────────────────────
@@ -205,7 +228,9 @@ namespace SashaRX.PrefabDoctor
 
         private static string GetSourcePropertyValue(Object sourceObj, string propertyPath)
         {
-            var so = new SerializedObject(sourceObj);
+            // SerializedObject owns a native handle; Dispose (via using) ensures
+            // it is released immediately instead of waiting for finalization.
+            using var so = new SerializedObject(sourceObj);
             var prop = so.FindProperty(propertyPath);
             if (prop == null) return null;
 
