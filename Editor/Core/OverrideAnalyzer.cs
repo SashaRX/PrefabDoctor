@@ -39,9 +39,22 @@ namespace SashaRX.PrefabDoctor
 
         /// <summary>
         /// Cache of SerializedObject instances — avoids repeated creation.
-        /// Cleared after each analysis run.
+        /// Disposed after each analysis run and when the owning window closes.
         /// </summary>
         private readonly Dictionary<Object, SerializedObject> _soCache = new();
+
+        /// <summary>
+        /// Dispose every cached SerializedObject and empty the cache. Safe to
+        /// call multiple times; safe to call when nothing is cached. Use from
+        /// analysis finally blocks and from the window's OnDisable.
+        /// </summary>
+        public void ClearSerializedObjectCache()
+        {
+            if (_soCache.Count == 0) return;
+            foreach (var so in _soCache.Values)
+                so?.Dispose();
+            _soCache.Clear();
+        }
 
         // ── Chain Building ─────────────────────────────────────────
 
@@ -202,7 +215,7 @@ namespace SashaRX.PrefabDoctor
             }
             finally
             {
-                _soCache.Clear();
+                ClearSerializedObjectCache();
                 report.AnalysisTimeMs = sw.ElapsedMilliseconds;
             }
 
@@ -317,7 +330,7 @@ namespace SashaRX.PrefabDoctor
             }
             finally
             {
-                _soCache.Clear();
+                ClearSerializedObjectCache();
                 report.AnalysisTimeMs = sw.ElapsedMilliseconds;
             }
 
@@ -404,7 +417,7 @@ namespace SashaRX.PrefabDoctor
 
             report.IsComplete = true;
             report.AnalysisTimeMs = sw.ElapsedMilliseconds;
-            _soCache.Clear();
+            ClearSerializedObjectCache();
 
             yield return 1f;
         }

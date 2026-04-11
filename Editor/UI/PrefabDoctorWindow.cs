@@ -687,6 +687,9 @@ namespace SashaRX.PrefabDoctor
             EditorApplication.update -= PumpIncrementalJob;
             EditorApplication.update -= PumpScanJob;
             _incrementalJob = null;
+            // Release any SerializedObject handles the analyzer kept across
+            // an incremental run that was abandoned by closing the window.
+            _analyzer?.ClearSerializedObjectCache();
             _scanPanel.OnDisable();
         }
 
