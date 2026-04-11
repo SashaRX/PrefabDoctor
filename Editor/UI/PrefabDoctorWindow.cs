@@ -517,6 +517,8 @@ namespace SashaRX.PrefabDoctor
 
             Repaint();
         }
+
+        private void PumpIncrementalJob()
         {
             if (_incrementalJob == null)
             {
