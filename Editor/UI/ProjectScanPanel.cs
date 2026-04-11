@@ -256,8 +256,13 @@ namespace SashaRX.PrefabDoctor
             };
             GUILayout.Label(catLabel, EditorStyles.miniLabel, GUILayout.Width(110));
 
-            // Prefab name (clickable — ping in project)
-            if (GUILayout.Button(r.DisplayName, EditorStyles.miniLabel, GUILayout.Width(200)))
+            // Prefab name — clickable link style
+            var linkStyle = new GUIStyle(EditorStyles.miniLabel)
+            {
+                normal = { textColor = new Color(0.4f, 0.7f, 1f) },
+                hover = { textColor = new Color(0.5f, 0.8f, 1f) }
+            };
+            if (GUILayout.Button(r.DisplayName, linkStyle, GUILayout.Width(200)))
             {
                 var obj = AssetDatabase.LoadMainAssetAtPath(r.AssetPath);
                 if (obj != null)
@@ -265,6 +270,29 @@ namespace SashaRX.PrefabDoctor
                     EditorGUIUtility.PingObject(obj);
                     Selection.activeObject = obj;
                 }
+            }
+            // Hover cursor
+            var lastRect = GUILayoutUtility.GetLastRect();
+            EditorGUIUtility.AddCursorRect(lastRect, MouseCursor.Link);
+
+            // FBX source — clickable if exists
+            if (!string.IsNullOrEmpty(r.BaseFbxPath))
+            {
+                var fbxStyle = new GUIStyle(EditorStyles.miniLabel)
+                {
+                    normal = { textColor = new Color(1f, 0.7f, 0.3f) }
+                };
+                string fbxName = System.IO.Path.GetFileName(r.BaseFbxPath);
+                if (GUILayout.Button(fbxName, fbxStyle, GUILayout.Width(120)))
+                {
+                    var fbx = AssetDatabase.LoadMainAssetAtPath(r.BaseFbxPath);
+                    if (fbx != null)
+                    {
+                        EditorGUIUtility.PingObject(fbx);
+                        Selection.activeObject = fbx;
+                    }
+                }
+                EditorGUIUtility.AddCursorRect(GUILayoutUtility.GetLastRect(), MouseCursor.Link);
             }
 
             // Details
