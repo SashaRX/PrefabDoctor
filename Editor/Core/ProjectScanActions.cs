@@ -189,119 +189,202 @@ namespace SashaRX.PrefabDoctor
         // ── Remove Unused Overrides ────────────────────────────────
 
         /// <summary>
-        /// Remove unused overrides from a prefab asset.
-        /// Uses built-in API on 2022.2+, falls back to manual cleanup.
+        /// Remove unused overrides from a prefab asset, including nested
+        /// PrefabInstance children. Opens the prefab in isolation via
+        /// <see cref="PrefabUtility.EditPrefabContentsScope"/>, collects
+        /// every nested instance root, and hands them to Unity's built-in
+        /// <see cref="PrefabUtility.RemoveUnusedOverrides"/> (the same
+        /// path as the Hierarchy right-click menu). Returns the total
+        /// number of modifications removed across all instance roots
+        /// inside the file.
+        ///
+        /// Deep cleanup: a single call reaches orphans at any nesting
+        /// depth. The scope's <c>Dispose</c> re-saves the asset.
         /// </summary>
         public static int RemoveUnusedOverrides(string prefabPath)
         {
-            var prefab = AssetDatabase.LoadMainAssetAtPath(prefabPath) as GameObject;
-            if (prefab == null) return 0;
+            if (string.IsNullOrEmpty(prefabPath)) return 0;
+            if (!prefabPath.EndsWith(".prefab", System.StringComparison.OrdinalIgnoreCase))
+                return 0;
+
+            int total = 0;
+            try
+            {
+                using var scope = new PrefabUtility.EditPrefabContentsScope(prefabPath);
+                var root = scope.prefabContentsRoot;
+                if (root == null) return 0;
+
+                // Collect every nested prefab instance root inside this
+                // loaded prefab. A variant prefab's own root is itself an
+                // instance, so include it too.
+                var instances = new List<GameObject>();
+                if (PrefabUtility.IsAnyPrefabInstanceRoot(root))
+                    instances.Add(root);
+                CollectNestedInstanceRoots(root.transform, instances);
+
+                if (instances.Count == 0) return 0;
 
 #if UNITY_2022_2_OR_NEWER
-            // Use built-in API
-            int beforeCount = CountOverrides(prefab);
-            PrefabUtility.RemoveUnusedOverrides(
-                new[] { prefab }, InteractionMode.AutomatedAction);
-            int afterCount = CountOverrides(prefab);
-            int removed = beforeCount - afterCount;
+                // Unity's built-in deep cleanup — same algorithm as the
+                // Hierarchy right-click "Remove Unused Overrides" menu.
+                int before = 0;
+                for (int i = 0; i < instances.Count; i++) before += CountMods(instances[i]);
 
-            if (removed > 0)
-                Debug.Log($"[Prefab Doctor] Removed {removed} unused overrides from {prefabPath}");
-            return removed;
+                PrefabUtility.RemoveUnusedOverrides(
+                    instances.ToArray(), InteractionMode.AutomatedAction);
+
+                int after = 0;
+                for (int i = 0; i < instances.Count; i++) after += CountMods(instances[i]);
+                total = before - after;
 #else
-            // Manual fallback: remove overrides with invalid property paths
-            return RemoveUnusedOverridesManual(prefab);
+                foreach (var inst in instances)
+                    total += ManualCleanInstance(inst);
 #endif
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError(
+                    $"[Prefab Doctor] Failed to clean {prefabPath}: {ex.Message}");
+                return 0;
+            }
+
+            if (total > 0)
+                Debug.Log($"[Prefab Doctor] Removed {total} unused overrides from {prefabPath}");
+            return total;
         }
 
-        private static int RemoveUnusedOverridesManual(GameObject prefab)
+        /// <summary>
+        /// Recursively walk <paramref name="parent"/>'s children and add every
+        /// GameObject that is a prefab instance root to <paramref name="result"/>.
+        /// </summary>
+        private static void CollectNestedInstanceRoots(
+            Transform parent, List<GameObject> result)
         {
-            var mods = PrefabUtility.GetPropertyModifications(prefab);
-            if (mods == null) return 0;
+            for (int i = 0; i < parent.childCount; i++)
+            {
+                var child = parent.GetChild(i);
+                if (PrefabUtility.IsAnyPrefabInstanceRoot(child.gameObject))
+                    result.Add(child.gameObject);
+                CollectNestedInstanceRoots(child, result);
+            }
+        }
 
-            var keep = new List<PropertyModification>();
+        private static int CountMods(GameObject go)
+        {
+            var mods = PrefabUtility.GetPropertyModifications(go);
+            return mods?.Length ?? 0;
+        }
+
+#if !UNITY_2022_2_OR_NEWER
+        // Manual fallback for Unity < 2022.2 that lacks the public
+        // PrefabUtility.RemoveUnusedOverrides API. Only handles the
+        // target == null case; the 2022.2+ built-in also detects
+        // stale propertyPaths and SerializeReference drift which we
+        // cannot replicate without more SerializedObject gymnastics.
+        private static int ManualCleanInstance(GameObject instance)
+        {
+            var mods = PrefabUtility.GetPropertyModifications(instance);
+            if (mods == null || mods.Length == 0) return 0;
+
+            var keep = new List<PropertyModification>(mods.Length);
             int removed = 0;
-
             foreach (var mod in mods)
             {
-                if (mod.target == null)
-                {
-                    removed++;
-                    continue;
-                }
-
-                // Check if property path is still valid
-                try
-                {
-                    var so = new SerializedObject(mod.target);
-                    var prop = so.FindProperty(mod.propertyPath);
-                    if (prop == null && !PrefabUtility.IsDefaultOverride(mod))
-                    {
-                        removed++;
-                        continue;
-                    }
-                }
-                catch
-                {
-                    removed++;
-                    continue;
-                }
-
+                if (mod.target == null) { removed++; continue; }
                 keep.Add(mod);
             }
 
             if (removed > 0)
-            {
-                PrefabUtility.SetPropertyModifications(prefab, keep.ToArray());
-                Debug.Log($"[Prefab Doctor] Removed {removed} unused overrides (manual) " +
-                          $"from {AssetDatabase.GetAssetPath(prefab)}");
-            }
-
+                PrefabUtility.SetPropertyModifications(instance, keep.ToArray());
             return removed;
         }
+#endif
 
         /// <summary>
-        /// Batch remove unused overrides from multiple prefabs.
+        /// Batch remove unused overrides from multiple prefabs. Uses
+        /// <see cref="AssetDatabase.StartAssetEditing"/> so all writes are
+        /// grouped into one refresh.
         /// </summary>
         public static int BatchRemoveUnusedOverrides(IEnumerable<string> prefabPaths)
         {
+            if (prefabPaths == null) return 0;
+
             int total = 0;
+            int processed = 0;
 
-#if UNITY_2022_2_OR_NEWER
-            // Built-in batch API
-            var roots = new List<GameObject>();
-            foreach (var path in prefabPaths)
-            {
-                var prefab = AssetDatabase.LoadMainAssetAtPath(path) as GameObject;
-                if (prefab != null) roots.Add(prefab);
-            }
-
-            if (roots.Count > 0)
-            {
-                int before = roots.Sum(CountOverrides);
-                PrefabUtility.RemoveUnusedOverrides(
-                    roots.ToArray(), InteractionMode.AutomatedAction);
-                int after = roots.Sum(CountOverrides);
-                total = before - after;
-            }
-#else
             AssetDatabase.StartAssetEditing();
             try
             {
                 foreach (var path in prefabPaths)
+                {
                     total += RemoveUnusedOverrides(path);
+                    processed++;
+                }
             }
             finally
             {
                 AssetDatabase.StopAssetEditing();
+                AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
             }
-#endif
 
-            if (total > 0)
-                Debug.Log($"[Prefab Doctor] Batch removed {total} unused overrides " +
-                          $"from {prefabPaths.Count()} prefabs");
+            Debug.Log(
+                $"[Prefab Doctor] Batch cleanup: processed {processed} prefab files, "
+                + $"removed {total} unused override modifications total");
+            return total;
+        }
 
+        /// <summary>
+        /// Batch remove unused overrides from every prefab asset under the
+        /// given folder (or "Assets" if null). Uses AssetDatabase to find
+        /// paths, then calls <see cref="BatchRemoveUnusedOverrides"/> with
+        /// an optional progress callback so the caller can drive a
+        /// cancelable progress bar.
+        /// </summary>
+        public static int CleanAllUnusedOverridesInScope(
+            string folderScope,
+            System.Func<int, int, string, bool> onProgress = null)
+        {
+            string[] searchFolders = string.IsNullOrEmpty(folderScope)
+                ? new[] { "Assets" }
+                : new[] { folderScope };
+
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", searchFolders);
+            if (guids.Length == 0) return 0;
+
+            int total = 0;
+            int processed = 0;
+            bool cancelled = false;
+
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                for (int i = 0; i < guids.Length; i++)
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guids[i]);
+
+                    if (onProgress != null && onProgress(i, guids.Length, path))
+                    {
+                        cancelled = true;
+                        break;
+                    }
+
+                    total += RemoveUnusedOverrides(path);
+                    processed++;
+                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+            }
+
+            Debug.Log(
+                $"[Prefab Doctor] Scope cleanup ({folderScope ?? "Assets"}): "
+                + $"{(cancelled ? "cancelled after " : "processed ")}"
+                + $"{processed} / {guids.Length} prefab files, "
+                + $"removed {total} unused override modifications total");
             return total;
         }
 

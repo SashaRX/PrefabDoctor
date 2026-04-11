@@ -150,7 +150,81 @@ namespace SashaRX.PrefabDoctor
                 }
             }
 
+            // Deep bulk cleanup — works on every .prefab in the current
+            // folder scope, with or without a prior scan. This is the
+            // "just clean my whole project" button users reach for after
+            // Unity's Hierarchy right-click Remove Unused Overrides leaves
+            // deep nested orphans behind.
+            GUI.backgroundColor = new Color(1f, 0.75f, 0.3f);
+            if (GUILayout.Button("Clean All Unused", EditorStyles.toolbarButton,
+                    GUILayout.Width(120)))
+            {
+                DoCleanAllUnused();
+            }
+            GUI.backgroundColor = Color.white;
+
             EditorGUILayout.EndHorizontal();
+        }
+
+        private void DoCleanAllUnused()
+        {
+            string scope = _folderScope ?? "Assets";
+
+            // Count prefabs up front so the dialog can show an accurate
+            // total — this is a cheap GUID search, not a full scan.
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", new[] { scope });
+            int total = guids.Length;
+            if (total == 0)
+            {
+                EditorUtility.DisplayDialog("Prefab Doctor",
+                    $"No prefab assets found under '{scope}'.", "OK");
+                return;
+            }
+
+            bool confirmed = EditorUtility.DisplayDialog(
+                "Clean All Unused Overrides",
+                $"About to walk {total} prefab files under '{scope}'.\n\n"
+                + "For each file Prefab Doctor will open it in isolation, "
+                + "collect every nested PrefabInstance, and remove unused "
+                + "overrides via Unity's built-in API (same as the Hierarchy "
+                + "right-click menu, but deep).\n\n"
+                + "This rewrites prefab asset files on disk.\n"
+                + "Recommended: commit the working tree to git first.\n\n"
+                + "Continue?",
+                "Clean",
+                "Cancel");
+
+            if (!confirmed) return;
+
+            int removed = 0;
+            try
+            {
+                removed = ProjectScanActions.CleanAllUnusedOverridesInScope(
+                    _folderScope,
+                    (i, n, path) =>
+                    {
+                        // Returning true cancels the loop.
+                        return EditorUtility.DisplayCancelableProgressBar(
+                            "Prefab Doctor — Clean All Unused",
+                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
+                            n > 0 ? (float)i / n : 0f);
+                    });
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            EditorUtility.DisplayDialog(
+                "Prefab Doctor",
+                $"Removed {removed} unused override modifications across "
+                + $"{total} prefab files under '{scope}'.\n\n"
+                + "Re-run Scan Project to see the updated state.",
+                "OK");
+
+            // Auto-refresh scan if we have a report
+            if (_report != null && _report.IsComplete)
+                RunScan();
         }
 
         // ── Status bar ─────────────────────────────────────────────
