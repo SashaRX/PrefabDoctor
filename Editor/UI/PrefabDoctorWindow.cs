@@ -230,6 +230,13 @@ namespace SashaRX.PrefabDoctor
                     Debug.Log($"[Prefab Doctor] Cleaned {removed} insignificant overrides");
                     RunAnalysis();
                 }
+
+                if (GUILayout.Button("Copy Report", EditorStyles.toolbarButton, GUILayout.Width(85)))
+                {
+                    string md = OverrideReportFormatter.ToMarkdown(_report);
+                    EditorGUIUtility.systemCopyBuffer = md;
+                    Debug.Log($"[Prefab Doctor] Copied report ({md.Length} chars) to clipboard");
+                }
             }
 
             EditorGUILayout.EndHorizontal();
