@@ -30,7 +30,7 @@ namespace SashaRX.PrefabDoctor
                     var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
                     if (level.Root == null) continue;
 
-                    RemoveModification(level.Root, conflict.Key.PropertyPath, conflict.Key.ComponentType);
+                    RemoveModification(level.Root, conflict.Key);
                 }
             }
             finally
@@ -55,7 +55,7 @@ namespace SashaRX.PrefabDoctor
                     var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
                     if (level.Root == null) continue;
 
-                    RemoveModification(level.Root, conflict.Key.PropertyPath, conflict.Key.ComponentType);
+                    RemoveModification(level.Root, conflict.Key);
                 }
             }
             finally
@@ -214,25 +214,45 @@ namespace SashaRX.PrefabDoctor
         }
 
         /// <summary>
-        /// Batch revert: remove all overrides from the provided conflicts.
+        /// Batch revert: remove every override in <paramref name="tasks"/>.
+        /// Each task pairs a PrefabInstance root with one conflict that was
+        /// originally discovered through that root. This overload is the
+        /// correct entry point for hierarchy-mode callers, where different
+        /// conflicts in the same batch can live under different nested
+        /// PrefabInstance owners and therefore need different chains.
+        /// Chains are cached per unique instance root so a big batch still
+        /// only walks each owner once. All removals collapse into one Undo
+        /// group.
         /// </summary>
-        public static void BatchRevert(GameObject root, IEnumerable<PropertyConflict> conflicts)
+        public static void BatchRevert(
+            IEnumerable<(GameObject instanceRoot, PropertyConflict conflict)> tasks)
         {
+            if (tasks == null) return;
+
             Undo.SetCurrentGroupName("Prefab Doctor: Batch revert");
             int group = Undo.GetCurrentGroup();
             try
             {
-                var chain = new OverrideAnalyzer().BuildChain(root);
+                var analyzer = new OverrideAnalyzer();
+                var chainCache = new Dictionary<int, List<NestingLevel>>();
 
-                foreach (var conflict in conflicts)
+                foreach (var (instanceRoot, conflict) in tasks)
                 {
+                    if (instanceRoot == null || conflict == null) continue;
+
+                    int rootId = instanceRoot.GetInstanceID();
+                    if (!chainCache.TryGetValue(rootId, out var chain))
+                    {
+                        chain = analyzer.BuildChain(instanceRoot);
+                        chainCache[rootId] = chain;
+                    }
+
                     foreach (var entry in conflict.Overrides)
                     {
                         var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
                         if (level.Root == null) continue;
 
-                        RemoveModification(level.Root, conflict.Key.PropertyPath,
-                            conflict.Key.ComponentType);
+                        RemoveModification(level.Root, conflict.Key);
                     }
                 }
             }
@@ -242,23 +262,45 @@ namespace SashaRX.PrefabDoctor
             }
         }
 
+        /// <summary>
+        /// Backward-compat wrapper for instance-analysis callers where the
+        /// analyzed root is shared across every conflict in the batch.
+        /// Thin shim over the tasks-based overload.
+        /// </summary>
+        public static void BatchRevert(GameObject root, IEnumerable<PropertyConflict> conflicts)
+        {
+            if (root == null || conflicts == null) return;
+            BatchRevert(conflicts.Select(c => (root, c)));
+        }
+
         // ── Internal helpers ───────────────────────────────────────
 
-        private static void RemoveModification(GameObject prefabRoot,
-            string propertyPath, string componentType)
+        /// <summary>
+        /// Strip a single PropertyModification from <paramref name="prefabRoot"/>.
+        /// Matches on (propertyPath, target InstanceID) so sibling components
+        /// of the same type (e.g. two FishNet NetworkBehaviours reporting the
+        /// same <c>GetType().Name</c>) cannot be clobbered by a revert of just
+        /// one of them. Conflicts whose <see cref="PropertyKey.TargetInstanceId"/>
+        /// is 0 (orphans, quaternion synthetic groups) intentionally hit no
+        /// mods here — orphans are handled by <see cref="CleanOrphans"/>,
+        /// quaternion groups are a display-only aggregation.
+        /// </summary>
+        private static void RemoveModification(GameObject prefabRoot, in PropertyKey key)
         {
             var mods = PrefabUtility.GetPropertyModifications(prefabRoot);
             if (mods == null) return;
 
-            Undo.RecordObject(prefabRoot, "Remove override");
+            int targetId = key.TargetInstanceId;
+            string propertyPath = key.PropertyPath;
 
             var filtered = mods.Where(m =>
                 !(m.propertyPath == propertyPath &&
                   m.target != null &&
-                  m.target.GetType().Name == componentType)).ToArray();
+                  m.target.GetInstanceID() == targetId)).ToArray();
 
             if (filtered.Length < mods.Length)
             {
+                Undo.RecordObject(prefabRoot, "Remove override");
                 PrefabUtility.SetPropertyModifications(prefabRoot, filtered);
             }
         }
