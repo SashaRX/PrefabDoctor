@@ -6,6 +6,7 @@ using System.Linq;
 using UnityEditor;
 using UnityEditor.IMGUI.Controls;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace SashaRX.PrefabDoctor
 {
@@ -432,6 +433,19 @@ namespace SashaRX.PrefabDoctor
                 {
                     _selectedGoIndex = i;
                     _selectedConflicts.Clear();
+
+                    // Ping + select the actual scene GameObject so the user
+                    // can jump straight from a row in the conflict list to
+                    // the object in the Hierarchy / Scene view. For reports
+                    // built from prefab-asset levels deep in the chain the
+                    // resolver returns null (no scene representation) and we
+                    // quietly skip the ping.
+                    var sceneGO = ResolveByRelativePath(goReport.RelativePath);
+                    if (sceneGO != null)
+                    {
+                        EditorGUIUtility.PingObject(sceneGO);
+                        Selection.activeGameObject = sceneGO;
+                    }
                 }
 
                 GUILayout.FlexibleSpace();
@@ -465,6 +479,63 @@ namespace SashaRX.PrefabDoctor
             GUI.color = color;
             GUI.DrawTexture(dotRect, EditorGUIUtility.whiteTexture, ScaleMode.ScaleToFit);
             GUI.color = prev;
+        }
+
+        /// <summary>
+        /// Resolve a <see cref="GameObjectReport.RelativePath"/> back to a
+        /// live scene GameObject. The path was produced by
+        /// <c>OverrideAnalyzer.GetRelativePath</c> which walks parents all
+        /// the way up to the scene root, so it always starts with the top
+        /// level GameObject's name.
+        ///
+        /// Resolution order:
+        ///   1. Walk from <c>_target</c> if the path starts with its name.
+        ///      Fast path for the common case where the analyzed root is
+        ///      the same object we need to ping.
+        ///   2. Walk scene roots in the active scene.
+        ///
+        /// Returns null if the path corresponds to an object that lives
+        /// inside a prefab asset (not in the scene) — nothing to ping.
+        /// </summary>
+        private GameObject ResolveByRelativePath(string path)
+        {
+            if (string.IsNullOrEmpty(path) || path == "?") return null;
+
+            // Fast path: resolve via _target if its name matches the root.
+            if (_target != null)
+            {
+                string rootName = _target.name;
+                if (path == rootName) return _target;
+                if (path.StartsWith(rootName + "/", StringComparison.Ordinal))
+                {
+                    string rest = path[(rootName.Length + 1)..];
+                    var child = _target.transform.Find(rest);
+                    if (child != null) return child.gameObject;
+                }
+            }
+
+            // Fallback: walk scene roots. The active scene is where the
+            // analyzed instance lives on hierarchy mode, so this catches
+            // paths whose first segment is not _target (e.g. when the user
+            // analyzed a sub-tree but the report contains parent paths).
+            var activeScene = SceneManager.GetActiveScene();
+            if (!activeScene.IsValid()) return null;
+
+            int slash = path.IndexOf('/');
+            string firstName = slash < 0 ? path : path[..slash];
+
+            var rootGOs = activeScene.GetRootGameObjects();
+            for (int i = 0; i < rootGOs.Length; i++)
+            {
+                if (rootGOs[i].name != firstName) continue;
+                if (slash < 0) return rootGOs[i];
+
+                string rest = path[(slash + 1)..];
+                var child = rootGOs[i].transform.Find(rest);
+                if (child != null) return child.gameObject;
+            }
+
+            return null;
         }
 
         // ── Right Panel: Conflict Table ────────────────────────────
