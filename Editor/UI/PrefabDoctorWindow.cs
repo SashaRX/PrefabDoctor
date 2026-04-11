@@ -127,9 +127,15 @@ namespace SashaRX.PrefabDoctor
 
             // Analyze button
             GUI.backgroundColor = _target != null ? new Color(0.4f, 0.8f, 0.4f) : Color.gray;
-            if (GUILayout.Button("Analyze", EditorStyles.toolbarButton, GUILayout.Width(70)))
+            if (GUILayout.Button("Analyze", EditorStyles.toolbarButton, GUILayout.Width(60)))
             {
                 RunAnalysis();
+            }
+            // Hierarchy mode — the important one
+            GUI.backgroundColor = _target != null ? new Color(0.3f, 0.6f, 1f) : Color.gray;
+            if (GUILayout.Button("▼ Hierarchy", EditorStyles.toolbarButton, GUILayout.Width(85)))
+            {
+                RunHierarchyAnalysis();
             }
             GUI.backgroundColor = Color.white;
 
@@ -180,19 +186,28 @@ namespace SashaRX.PrefabDoctor
 
             EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
 
-            var chainNames = string.Join(" → ",
-                _report.Chain.Select(l => l.IsSceneInstance ? "[Scene]" :
-                    System.IO.Path.GetFileNameWithoutExtension(l.AssetPath)));
-            GUILayout.Label($"Chain: {chainNames}", EditorStyles.miniLabel);
+            if (_report.IsHierarchyMode)
+            {
+                GUILayout.Label($"HIERARCHY: {_report.InstancesAnalyzed} instances, " +
+                                $"{_report.GameObjects.Count} objects with overrides",
+                    EditorStyles.miniLabel);
+            }
+            else
+            {
+                var chainNames = string.Join(" → ",
+                    _report.Chain.Select(l => l.IsSceneInstance ? "[Scene]" :
+                        System.IO.Path.GetFileNameWithoutExtension(l.AssetPath)));
+                GUILayout.Label($"Chain: {chainNames}", EditorStyles.miniLabel);
+            }
 
             GUILayout.FlexibleSpace();
 
-            DrawBadge($"Ping-Pong: {_report.TotalPingPong}", Color.red, _report.TotalPingPong > 0);
-            DrawBadge($"Multi: {_report.TotalMultiOverride}", new Color(1f, 0.7f, 0f),
+            DrawBadge($"PP:{_report.TotalPingPong}", Color.red, _report.TotalPingPong > 0);
+            DrawBadge($"Multi:{_report.TotalMultiOverride}", new Color(1f, 0.7f, 0f),
                 _report.TotalMultiOverride > 0);
-            DrawBadge($"Orphan: {_report.TotalOrphan}", new Color(0.6f, 0.6f, 0.6f),
+            DrawBadge($"Orphan:{_report.TotalOrphan}", new Color(0.6f, 0.6f, 0.6f),
                 _report.TotalOrphan > 0);
-            DrawBadge($"Insignificant: {_report.TotalInsignificant}", new Color(0.5f, 0.8f, 1f),
+            DrawBadge($"Insig:{_report.TotalInsignificant}", new Color(0.5f, 0.8f, 1f),
                 _report.TotalInsignificant > 0);
 
             GUILayout.Label($"  {_report.AnalysisTimeMs:F0}ms", EditorStyles.miniLabel);
@@ -445,6 +460,14 @@ namespace SashaRX.PrefabDoctor
             RunAnalysis();
         }
 
+        public void SetTargetAndAnalyzeHierarchy(GameObject target)
+        {
+            _target = target;
+            _subtreeRoot = null;
+            _report = null;
+            RunHierarchyAnalysis();
+        }
+
         private Transform _subtreeRoot;
 
         private void RunAnalysis()
@@ -477,7 +500,23 @@ namespace SashaRX.PrefabDoctor
             Repaint();
         }
 
-        private void PumpIncrementalJob()
+        private void RunHierarchyAnalysis()
+        {
+            if (_target == null) return;
+
+            _incrementalJob = null;
+            _pendingReport = null;
+
+            _analyzer.IncludeDefaultOverrides = _showDefaults;
+            _analyzer.IncludeSceneOverrides = true; // hierarchy mode always includes scene
+            _analyzer.IncludeInternalProperties = _showInternalProps;
+
+            _report = _analyzer.AnalyzeHierarchy(_target);
+            _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
+            _selectedConflicts.Clear();
+
+            Repaint();
+        }
         {
             if (_incrementalJob == null)
             {

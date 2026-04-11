@@ -113,7 +113,13 @@ namespace SashaRX.PrefabDoctor
         public int TotalInsignificant;
         public int TotalOrphan;
 
-        public bool IsComplete; // false if analysis was partial/interrupted
+        public bool IsComplete;
         public float AnalysisTimeMs;
+
+        /// <summary>True if this report was built with recursive hierarchy analysis.</summary>
+        public bool IsHierarchyMode;
+
+        /// <summary>Number of PrefabInstance roots analyzed (hierarchy mode).</summary>
+        public int InstancesAnalyzed;
     }
 }

@@ -52,5 +52,21 @@ namespace SashaRX.PrefabDoctor
             return Selection.activeGameObject != null &&
                    PrefabUtility.IsPartOfPrefabInstance(Selection.activeGameObject);
         }
+
+        [MenuItem("GameObject/Prefab Doctor/Analyze Full Hierarchy", false, 51)]
+        private static void AnalyzeHierarchyFromMenu()
+        {
+            var go = Selection.activeGameObject;
+            if (go == null) return;
+
+            var window = EditorWindow.GetWindow<PrefabDoctorWindow>("Prefab Doctor");
+            window.SetTargetAndAnalyzeHierarchy(go);
+        }
+
+        [MenuItem("GameObject/Prefab Doctor/Analyze Full Hierarchy", true)]
+        private static bool AnalyzeHierarchyValidate()
+        {
+            return Selection.activeGameObject != null;
+        }
     }
 }

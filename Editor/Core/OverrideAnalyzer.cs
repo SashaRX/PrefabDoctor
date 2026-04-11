@@ -209,7 +209,143 @@ namespace SashaRX.PrefabDoctor
             return report;
         }
 
-        // ── Incremental Analysis ───────────────────────────────────
+        // ── Hierarchy Analysis ─────────────────────────────────────
+
+        /// <summary>
+        /// Recursively analyzes ALL PrefabInstance roots in the hierarchy.
+        /// For each nested instance, builds its own chain and collects overrides.
+        /// Results are merged into a single report with full hierarchy paths.
+        /// This is the "full picture" mode — shows every override at every level
+        /// for every nested prefab in the entire tree.
+        /// </summary>
+        public AnalysisReport AnalyzeHierarchy(GameObject root)
+        {
+            var sw = Stopwatch.StartNew();
+            var report = new AnalysisReport
+            {
+                AnalyzedRoot = root,
+                IsHierarchyMode = true
+            };
+
+            try
+            {
+                // Find all PrefabInstance roots recursively
+                var instanceRoots = new List<(GameObject go, string hierarchyPath)>();
+                CollectPrefabInstanceRoots(root.transform, "", instanceRoots);
+
+                report.InstancesAnalyzed = instanceRoots.Count;
+
+                // Also include the root itself if it's a prefab instance
+                if (PrefabUtility.IsPartOfPrefabInstance(root))
+                {
+                    var outerRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(root);
+                    if (outerRoot == root)
+                        instanceRoots.Insert(0, (root, root.name));
+                }
+
+                // Build a combined chain from the root (for display)
+                report.Chain = BuildChain(root);
+
+                var goReports = new Dictionary<string, GameObjectReport>();
+
+                foreach (var (instanceGO, hierPath) in instanceRoots)
+                {
+                    // Build chain for this specific instance
+                    var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(instanceGO);
+                    if (instanceRoot == null) instanceRoot = instanceGO;
+
+                    var chain = BuildChain(instanceRoot);
+                    if (chain.Count < 2) continue;
+
+                    // Collect overrides for this instance
+                    var overrideMap = CollectOverrides(chain);
+
+                    // Classify and merge into report — prefix paths with hierarchy location
+                    foreach (var kvp in overrideMap)
+                    {
+                        if (ComparerRouter.IsQuaternionComponent(kvp.Key.PropertyPath))
+                            continue;
+
+                        // Prefix the GO path with hierarchy path so we know WHERE in the tree
+                        var prefixedKey = new PropertyKey
+                        {
+                            ComponentType = kvp.Key.ComponentType,
+                            GameObjectPath = hierPath.Length > 0
+                                ? $"{hierPath}/{kvp.Key.GameObjectPath}"
+                                : kvp.Key.GameObjectPath,
+                            PropertyPath = kvp.Key.PropertyPath
+                        };
+
+                        var conflict = ClassifyConflict(prefixedKey, kvp.Value, chain);
+                        if (conflict != null)
+                            AddConflictToReport(goReports, conflict, report);
+                    }
+
+                    // Quaternion groups
+                    var qGroups = GroupQuaternionOverrides(overrideMap);
+                    foreach (var qg in qGroups)
+                    {
+                        var prefixedKey = new PropertyKey
+                        {
+                            ComponentType = qg.BaseKey.ComponentType,
+                            GameObjectPath = hierPath.Length > 0
+                                ? $"{hierPath}/{qg.BaseKey.GameObjectPath}"
+                                : qg.BaseKey.GameObjectPath,
+                            PropertyPath = qg.BaseKey.PropertyPath
+                        };
+
+                        var prefixedQg = new QuaternionGroup
+                        {
+                            BaseKey = prefixedKey,
+                            ValuesByDepth = qg.ValuesByDepth,
+                            AssetPathsByDepth = qg.AssetPathsByDepth
+                        };
+
+                        var conflict = ClassifyQuaternionGroup(prefixedQg);
+                        if (conflict != null)
+                            AddConflictToReport(goReports, conflict, report);
+                    }
+                }
+
+                report.GameObjects = goReports.Values
+                    .OrderByDescending(g => g.PingPongCount)
+                    .ThenByDescending(g => g.MultiOverrideCount)
+                    .ThenByDescending(g => g.InsignificantCount)
+                    .ToList();
+
+                report.IsComplete = true;
+            }
+            finally
+            {
+                _soCache.Clear();
+                report.AnalysisTimeMs = sw.ElapsedMilliseconds;
+            }
+
+            return report;
+        }
+
+        /// <summary>
+        /// Recursively find all GameObjects that are PrefabInstance roots.
+        /// </summary>
+        private void CollectPrefabInstanceRoots(Transform parent, string parentPath,
+            List<(GameObject go, string hierarchyPath)> results)
+        {
+            for (int i = 0; i < parent.childCount; i++)
+            {
+                var child = parent.GetChild(i);
+                string childPath = parentPath.Length > 0
+                    ? $"{parentPath}/{child.name}"
+                    : child.name;
+
+                if (PrefabUtility.IsAnyPrefabInstanceRoot(child.gameObject))
+                {
+                    results.Add((child.gameObject, childPath));
+                }
+
+                // Continue recursing into children — nested instances inside nested instances
+                CollectPrefabInstanceRoots(child, childPath, results);
+            }
+        }
 
         /// <summary>
         /// Incremental analysis for large prefabs.
