@@ -163,7 +163,103 @@ namespace SashaRX.PrefabDoctor
             }
             GUI.backgroundColor = Color.white;
 
+            // Canonical LOD lightmap scale cascade: write 0.5^lodIndex into
+            // every prefab with a LODGroup, then strip stale
+            // m_ScaleInLightmap mods from intermediate variants so the
+            // leaf value is what propagates to scenes. See Task 9 in the
+            // plan file for the full rationale.
+            GUI.backgroundColor = new Color(0.3f, 0.85f, 0.85f);
+            if (GUILayout.Button("Fix LOD Lightmap Scale", EditorStyles.toolbarButton,
+                    GUILayout.Width(150)))
+            {
+                DoNormaliseLodLightmapScale();
+            }
+            GUI.backgroundColor = Color.white;
+
             EditorGUILayout.EndHorizontal();
+        }
+
+        private void DoNormaliseLodLightmapScale()
+        {
+            string scope = _folderScope ?? "Assets";
+
+            // Count prefabs up front — cheap GUID search.
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", new[] { scope });
+            int total = guids.Length;
+            if (total == 0)
+            {
+                EditorUtility.DisplayDialog("Prefab Doctor",
+                    $"No prefab assets found under '{scope}'.", "OK");
+                return;
+            }
+
+            bool confirmed = EditorUtility.DisplayDialog(
+                "Fix LOD Lightmap Scale",
+                $"About to normalise LOD lightmap scales in {total} prefab files "
+                + $"under '{scope}'.\n\n"
+                + "Phase A — write the canonical cascade into every prefab "
+                + "with a LODGroup:\n"
+                + "    LOD0 = 1.00\n"
+                + "    LOD1 = 0.50\n"
+                + "    LOD2 = 0.25\n"
+                + "    LOD3 = 0.125\n"
+                + "    ...\n\n"
+                + "Phase B — strip every m_ScaleInLightmap PropertyModification "
+                + "from nested PrefabInstance nodes across intermediate prefabs.\n\n"
+                + "This rewrites prefab asset files on disk.\n"
+                + "Recommended: commit the working tree to git first.\n\n"
+                + "Continue?",
+                "Fix",
+                "Cancel");
+
+            if (!confirmed) return;
+
+            int phaseAWrites = 0;
+            int phaseBStripped = 0;
+
+            try
+            {
+                phaseAWrites = ProjectScanActions.NormaliseLodLightmapScaleInScope(
+                    _folderScope,
+                    (i, n, path) =>
+                        EditorUtility.DisplayCancelableProgressBar(
+                            "Prefab Doctor — LOD Cascade (1/2)",
+                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
+                            n > 0 ? (float)i / n : 0f));
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            try
+            {
+                phaseBStripped = ProjectScanActions.StripLodLightmapScaleOverridesInScope(
+                    _folderScope,
+                    (i, n, path) =>
+                        EditorUtility.DisplayCancelableProgressBar(
+                            "Prefab Doctor — Strip Intermediate (2/2)",
+                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
+                            n > 0 ? (float)i / n : 0f));
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            EditorUtility.DisplayDialog(
+                "Prefab Doctor",
+                $"Phase A: wrote canonical cascade to {phaseAWrites} renderer "
+                + $"m_ScaleInLightmap fields.\n\n"
+                + $"Phase B: stripped {phaseBStripped} m_ScaleInLightmap "
+                + $"modifications from intermediate prefabs.\n\n"
+                + $"Scope: '{scope}'.\n\n"
+                + "Re-run Scan Project (or hierarchy analysis on your scene) "
+                + "to see the updated state.",
+                "OK");
+
+            if (_report != null && _report.IsComplete)
+                RunScan();
         }
 
         private void DoCleanAllUnused()

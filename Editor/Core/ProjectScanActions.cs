@@ -388,6 +388,237 @@ namespace SashaRX.PrefabDoctor
             return total;
         }
 
+        // ── LOD Lightmap Scale Canonicalisation ────────────────────
+
+        /// <summary>
+        /// Phase A of the LOD lightmap scale fix: walk every .prefab under
+        /// <paramref name="folderScope"/>, find every <see cref="LODGroup"/>
+        /// inside it, and write the canonical cascade
+        /// <c>scale = 0.5 ^ lodIndex</c> onto each LOD's renderers'
+        /// <c>m_ScaleInLightmap</c>. Idempotent: already-correct values
+        /// are left alone so reruns are near-free and file hashes stable.
+        ///
+        /// Pairs with <see cref="StripLodLightmapScaleOverridesInScope"/>
+        /// (Phase B) — run that afterwards to drop stale intermediate
+        /// PropertyModifications that shadow the new canonical value.
+        /// Returns the total number of renderer property writes.
+        /// </summary>
+        public static int NormaliseLodLightmapScaleInScope(
+            string folderScope,
+            System.Func<int, int, string, bool> onProgress = null)
+        {
+            string[] searchFolders = string.IsNullOrEmpty(folderScope)
+                ? new[] { "Assets" }
+                : new[] { folderScope };
+
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", searchFolders);
+            if (guids.Length == 0) return 0;
+
+            int totalWrites = 0;
+            int touchedPrefabs = 0;
+            int processed = 0;
+            bool cancelled = false;
+
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                for (int i = 0; i < guids.Length; i++)
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guids[i]);
+
+                    if (onProgress != null && onProgress(i, guids.Length, path))
+                    {
+                        cancelled = true;
+                        break;
+                    }
+
+                    int writes = NormaliseLodLightmapScaleInFile(path);
+                    if (writes > 0)
+                    {
+                        totalWrites += writes;
+                        touchedPrefabs++;
+                    }
+                    processed++;
+                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+            }
+
+            Debug.Log(
+                $"[Prefab Doctor] LOD cascade ({folderScope ?? "Assets"}): "
+                + $"{(cancelled ? "cancelled after " : "processed ")}"
+                + $"{processed} / {guids.Length} prefab files, "
+                + $"wrote {totalWrites} renderer scales in {touchedPrefabs} prefabs");
+            return totalWrites;
+        }
+
+        private static int NormaliseLodLightmapScaleInFile(string prefabPath)
+        {
+            if (string.IsNullOrEmpty(prefabPath)) return 0;
+            if (!prefabPath.EndsWith(".prefab", System.StringComparison.OrdinalIgnoreCase))
+                return 0;
+
+            int writes = 0;
+            try
+            {
+                using var scope = new PrefabUtility.EditPrefabContentsScope(prefabPath);
+                var root = scope.prefabContentsRoot;
+                if (root == null) return 0;
+
+                var groups = root.GetComponentsInChildren<LODGroup>(true);
+                if (groups == null || groups.Length == 0) return 0;
+
+                foreach (var group in groups)
+                {
+                    if (group == null) continue;
+                    var lods = group.GetLODs();
+                    if (lods == null) continue;
+
+                    for (int lodIndex = 0; lodIndex < lods.Length; lodIndex++)
+                    {
+                        float canonical = Mathf.Pow(0.5f, lodIndex);
+                        var renderers = lods[lodIndex].renderers;
+                        if (renderers == null) continue;
+
+                        foreach (var renderer in renderers)
+                        {
+                            if (renderer == null) continue;
+
+                            using var so = new SerializedObject(renderer);
+                            var prop = so.FindProperty("m_ScaleInLightmap");
+                            if (prop == null) continue;
+                            if (Mathf.Approximately(prop.floatValue, canonical)) continue;
+
+                            prop.floatValue = canonical;
+                            so.ApplyModifiedPropertiesWithoutUndo();
+                            writes++;
+                        }
+                    }
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError(
+                    $"[Prefab Doctor] LOD cascade failed on {prefabPath}: {ex.Message}");
+                return 0;
+            }
+
+            return writes;
+        }
+
+        /// <summary>
+        /// Phase B of the LOD lightmap scale fix: walk every .prefab under
+        /// <paramref name="folderScope"/>, open it in isolation, and strip
+        /// every <c>m_ScaleInLightmap</c> PropertyModification from its
+        /// nested prefab instances. This flushes stale intermediate-level
+        /// overrides so variant-chain consumers resolve straight to the
+        /// leaf prefab's newly-canonicalised cascade.
+        ///
+        /// Pairs with <see cref="NormaliseLodLightmapScaleInScope"/>
+        /// (Phase A). Returns the total number of stripped modifications.
+        /// </summary>
+        public static int StripLodLightmapScaleOverridesInScope(
+            string folderScope,
+            System.Func<int, int, string, bool> onProgress = null)
+        {
+            string[] searchFolders = string.IsNullOrEmpty(folderScope)
+                ? new[] { "Assets" }
+                : new[] { folderScope };
+
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", searchFolders);
+            if (guids.Length == 0) return 0;
+
+            int totalStripped = 0;
+            int touchedPrefabs = 0;
+            int processed = 0;
+            bool cancelled = false;
+
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                for (int i = 0; i < guids.Length; i++)
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guids[i]);
+
+                    if (onProgress != null && onProgress(i, guids.Length, path))
+                    {
+                        cancelled = true;
+                        break;
+                    }
+
+                    int stripped = StripLodLightmapScaleOverridesInFile(path);
+                    if (stripped > 0)
+                    {
+                        totalStripped += stripped;
+                        touchedPrefabs++;
+                    }
+                    processed++;
+                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+            }
+
+            Debug.Log(
+                $"[Prefab Doctor] LOD strip ({folderScope ?? "Assets"}): "
+                + $"{(cancelled ? "cancelled after " : "processed ")}"
+                + $"{processed} / {guids.Length} prefab files, "
+                + $"stripped {totalStripped} m_ScaleInLightmap modifications in {touchedPrefabs} prefabs");
+            return totalStripped;
+        }
+
+        private static int StripLodLightmapScaleOverridesInFile(string prefabPath)
+        {
+            if (string.IsNullOrEmpty(prefabPath)) return 0;
+            if (!prefabPath.EndsWith(".prefab", System.StringComparison.OrdinalIgnoreCase))
+                return 0;
+
+            int stripped = 0;
+            try
+            {
+                using var scope = new PrefabUtility.EditPrefabContentsScope(prefabPath);
+                var root = scope.prefabContentsRoot;
+                if (root == null) return 0;
+
+                var instances = new List<GameObject>();
+                if (PrefabUtility.IsAnyPrefabInstanceRoot(root))
+                    instances.Add(root);
+                CollectNestedInstanceRoots(root.transform, instances);
+
+                foreach (var instance in instances)
+                {
+                    if (instance == null) continue;
+
+                    var mods = PrefabUtility.GetPropertyModifications(instance);
+                    if (mods == null || mods.Length == 0) continue;
+
+                    int before = mods.Length;
+                    var keep = mods.Where(m =>
+                        m == null || m.propertyPath != "m_ScaleInLightmap").ToArray();
+                    int removed = before - keep.Length;
+                    if (removed == 0) continue;
+
+                    PrefabUtility.SetPropertyModifications(instance, keep);
+                    stripped += removed;
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError(
+                    $"[Prefab Doctor] LOD strip failed on {prefabPath}: {ex.Message}");
+                return 0;
+            }
+
+            return stripped;
+        }
+
         // ── Helpers ────────────────────────────────────────────────
 
         private static int CountOverrides(GameObject prefab)
