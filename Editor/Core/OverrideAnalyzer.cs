@@ -328,6 +328,16 @@ namespace SashaRX.PrefabDoctor
             var goReports = new Dictionary<string, GameObjectReport>();
             int total = instanceRoots.Count;
 
+            // Mid-instance yielding: a single heavyweight instance (e.g. one
+            // with thousands of NetworkBehaviours backing fields) can do
+            // orders of magnitude more work than a lightweight one. Yielding
+            // only between instances was enough to freeze Unity's main
+            // thread for seconds whenever we hit a heavy one. Cap the
+            // per-MoveNext classification budget so the pump in the window
+            // can interleave UI events even inside a single instance.
+            const int classifyBudgetPerYield = 200;
+            int classifiedSinceYield = 0;
+
             for (int idx = 0; idx < total; idx++)
             {
                 var (instanceGO, hierPath) = instanceRoots[idx];
@@ -340,6 +350,7 @@ namespace SashaRX.PrefabDoctor
                 if (chain.Count >= 2)
                 {
                     var overrideMap = CollectOverrides(chain);
+                    float progress = (float)idx / total;
 
                     // Scalar properties — classify and merge with hier-prefixed paths.
                     foreach (var kvp in overrideMap)
@@ -359,6 +370,12 @@ namespace SashaRX.PrefabDoctor
                         var conflict = ClassifyConflict(prefixedKey, kvp.Value, chain);
                         if (conflict != null)
                             AddConflictToReport(goReports, conflict, report);
+
+                        if (++classifiedSinceYield >= classifyBudgetPerYield)
+                        {
+                            classifiedSinceYield = 0;
+                            yield return progress;
+                        }
                     }
 
                     // Quaternion groups.
@@ -384,12 +401,17 @@ namespace SashaRX.PrefabDoctor
                         var conflict = ClassifyQuaternionGroup(prefixedQg);
                         if (conflict != null)
                             AddConflictToReport(goReports, conflict, report);
+
+                        if (++classifiedSinceYield >= classifyBudgetPerYield)
+                        {
+                            classifiedSinceYield = 0;
+                            yield return progress;
+                        }
                     }
                 }
 
-                // Yield after each instance — the batch granularity is already
-                // "one prefab instance worth of work", which on typical content
-                // is a few ms and keeps the editor very responsive.
+                // Always yield at the instance boundary so progress ticks
+                // smoothly even for empty / lightweight instances.
                 yield return total > 0 ? (float)(idx + 1) / total : 1f;
             }
 
@@ -704,6 +726,20 @@ namespace SashaRX.PrefabDoctor
 
             if (entries.Count == 1)
             {
+                // Known-noise categories (NetworkNoise, Lightmap) are shortcut
+                // to Insignificant without opening a SerializedObject — those
+                // properties are shut off from gameplay by design and the
+                // expensive FindProperty round-trip dominates cost on scenes
+                // with lots of networking/lightmap data (the whole reason a
+                // Level with thousands of nested instances was freezing the
+                // editor for minutes).
+                if (conflict.Category == OverrideCategory.NetworkNoise
+                    || conflict.Category == OverrideCategory.Lightmap)
+                {
+                    conflict.Severity = ConflictSeverity.Insignificant;
+                    return conflict;
+                }
+
                 if (CheckInsignificant(key, entries[0], chain))
                 {
                     conflict.Severity = ConflictSeverity.Insignificant;
