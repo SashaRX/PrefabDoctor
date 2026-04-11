@@ -559,11 +559,48 @@ namespace SashaRX.PrefabDoctor
             _analyzer.IncludeSceneOverrides = true; // hierarchy mode always includes scene
             _analyzer.IncludeInternalProperties = _showInternalProps;
 
-            _report = _analyzer.AnalyzeHierarchy(_target);
+            int nestedInstanceCount = CountNestedPrefabInstances(_target.transform);
+            bool showProgress = nestedInstanceCount > 50;
+            if (showProgress)
+            {
+                EditorUtility.DisplayProgressBar(
+                    "Prefab Doctor",
+                    $"Analyzing {nestedInstanceCount} instances...",
+                    0f);
+            }
+
+            try
+            {
+                _report = _analyzer.AnalyzeHierarchy(_target);
+            }
+            finally
+            {
+                if (showProgress) EditorUtility.ClearProgressBar();
+            }
+
             _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
             _selectedConflicts.Clear();
 
+            Debug.Log(
+                $"[Prefab Doctor] Hierarchy: {_report.InstancesAnalyzed} instances, "
+                + $"{_report.TotalMultiOverride} multi, "
+                + $"{_report.TotalInsignificant} insignificant, "
+                + $"{_report.AnalysisTimeMs:F0}ms");
+
             Repaint();
+        }
+
+        private static int CountNestedPrefabInstances(Transform root)
+        {
+            int count = 0;
+            for (int i = 0; i < root.childCount; i++)
+            {
+                var child = root.GetChild(i);
+                if (PrefabUtility.IsAnyPrefabInstanceRoot(child.gameObject))
+                    count++;
+                count += CountNestedPrefabInstances(child);
+            }
+            return count;
         }
 
         private void PumpIncrementalJob()
