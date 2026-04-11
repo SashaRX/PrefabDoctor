@@ -50,6 +50,12 @@ namespace SashaRX.PrefabDoctor
         private string[] _runIgnoredPrefixes;
         private string[] _runIgnoredTypes;
 
+        // Per-run lookup caches. Share lifetime with _soCache so they get
+        // dropped in EndRun(). Avoid repeatedly walking Transform children or
+        // GetComponents() when many overrides target the same GO/component.
+        private readonly Dictionary<(int rootId, string path), GameObject> _goPathCache = new();
+        private readonly Dictionary<(int goId, string typeName), Object> _componentCache = new();
+
         private void BeginRun()
         {
             var settings = PrefabDoctorSettings.GetOrCreateDefault();
@@ -87,6 +93,8 @@ namespace SashaRX.PrefabDoctor
             ClearSerializedObjectCache();
             _runIgnoredPrefixes = null;
             _runIgnoredTypes = null;
+            _goPathCache.Clear();
+            _componentCache.Clear();
         }
 
         // ── Chain Building ─────────────────────────────────────────
@@ -691,24 +699,47 @@ namespace SashaRX.PrefabDoctor
         private (int first, int middle, int pingBack)? DetectPingPong(
             List<OverrideEntry> entries, string propertyPath)
         {
-            if (entries.Count < 2) return null;
+            int n = entries.Count;
+            if (n < 2) return null;
 
-            var sorted = entries.OrderBy(e => e.Depth).ToList();
+            // Build an index array sorted by depth so we can walk entries in
+            // depth order without allocating a second list. Insertion sort is
+            // fine: n is almost always 2-5 (one override per nesting level).
+            // Returning original indices removes the O(n) List.IndexOf scans
+            // the old implementation did on the success path.
+            Span<int> order = n <= 16 ? stackalloc int[n] : new int[n];
+            for (int i = 0; i < n; i++) order[i] = i;
+            for (int i = 1; i < n; i++)
+            {
+                int cur = order[i];
+                int curDepth = entries[cur].Depth;
+                int j = i - 1;
+                while (j >= 0 && entries[order[j]].Depth > curDepth)
+                {
+                    order[j + 1] = order[j];
+                    j--;
+                }
+                order[j + 1] = cur;
+            }
+
             var comparer = ComparerRouter.GetComparer(propertyPath);
 
-            for (int i = 0; i < sorted.Count; i++)
-            for (int j = i + 2; j < sorted.Count; j++)
+            for (int i = 0; i < n; i++)
             {
-                if (!comparer.AreEffectivelyEqual(sorted[i].Value, sorted[j].Value))
-                    continue;
+                int idxI = order[i];
+                string valI = entries[idxI].Value;
 
-                for (int k = i + 1; k < j; k++)
+                for (int j = i + 2; j < n; j++)
                 {
-                    if (!comparer.AreEffectivelyEqual(sorted[k].Value, sorted[i].Value))
+                    int idxJ = order[j];
+                    if (!comparer.AreEffectivelyEqual(valI, entries[idxJ].Value))
+                        continue;
+
+                    for (int k = i + 1; k < j; k++)
                     {
-                        return (entries.IndexOf(sorted[i]),
-                                entries.IndexOf(sorted[k]),
-                                entries.IndexOf(sorted[j]));
+                        int idxK = order[k];
+                        if (!comparer.AreEffectivelyEqual(entries[idxK].Value, valI))
+                            return (idxI, idxK, idxJ);
                     }
                 }
             }
@@ -741,10 +772,10 @@ namespace SashaRX.PrefabDoctor
             var sourceLevel = chain.FirstOrDefault(l => l.Depth == sourceDepth);
             if (sourceLevel.Root == null) return false;
 
-            var sourceGO = FindGameObjectByPath(sourceLevel.Root, key.GameObjectPath);
+            var sourceGO = GetGameObjectByPathCached(sourceLevel.Root, key.GameObjectPath);
             if (sourceGO == null) return false;
 
-            var sourceObj = FindComponent(sourceGO, key.ComponentType);
+            var sourceObj = GetComponentCached(sourceGO, key.ComponentType);
             if (sourceObj == null) return false;
 
             string sourceValue = ReadPropertyValue(sourceObj, key.PropertyPath);
@@ -752,6 +783,24 @@ namespace SashaRX.PrefabDoctor
 
             var comparer = ComparerRouter.GetComparer(key.PropertyPath);
             return comparer.AreEffectivelyEqual(entry.Value, sourceValue);
+        }
+
+        private GameObject GetGameObjectByPathCached(GameObject root, string relativePath)
+        {
+            var cacheKey = (root.GetInstanceID(), relativePath);
+            if (_goPathCache.TryGetValue(cacheKey, out var cached)) return cached;
+            var go = FindGameObjectByPath(root, relativePath);
+            _goPathCache[cacheKey] = go;
+            return go;
+        }
+
+        private Object GetComponentCached(GameObject go, string typeName)
+        {
+            var cacheKey = (go.GetInstanceID(), typeName);
+            if (_componentCache.TryGetValue(cacheKey, out var cached)) return cached;
+            var obj = FindComponent(go, typeName);
+            _componentCache[cacheKey] = obj;
+            return obj;
         }
 
         /// <summary>
