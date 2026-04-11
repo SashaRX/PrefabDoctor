@@ -88,7 +88,13 @@ namespace SashaRX.PrefabDoctor
             OrphansOnly,
             InsignificantOnly,
             LightmapOnly,
-            NetworkNoiseOnly
+            NetworkNoiseOnly,
+            /// <summary>Rendering-related overrides: Lightmap + StaticFlags + Material + Transform.</summary>
+            GraphicsOnly,
+            /// <summary>Transform category only (position / rotation / scale deltas).</summary>
+            TransformOnly,
+            /// <summary>Orphans + any MultiOverride — the "broken or redundant" set.</summary>
+            GarbageOnly
         }
 
         // ── Main Layout ────────────────────────────────────────────
@@ -757,16 +763,21 @@ namespace SashaRX.PrefabDoctor
                     _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
                     _selectedConflicts.Clear();
 
-                    // On a hierarchy run, the most actionable items are
-                    // ping-pong patterns (rare, always bugs) and
-                    // MultiOverride (design-smell). The noise categories
-                    // (Orphan / Lightmap / NetworkNoise) can easily be in
-                    // the hundreds of thousands and drown everything
-                    // useful if the default filter is "All". Start
-                    // narrow and let the user widen via the dropdown.
+                    // On a hierarchy run, pick the narrowest actionable
+                    // filter the data supports, so the user is not hit
+                    // with 300k rows of lightmap / network noise by
+                    // default. Preference order:
+                    //   1. PingPong — classic A→B→A bugs, always rare.
+                    //   2. GarbageOnly (Orphan + MultiOverride) — broken
+                    //      or redundant overrides, the "clean me" bucket.
+                    //   3. ConflictsOnly — whatever is left that is not
+                    //      insignificant.
+                    // The user can widen via the dropdown in one click.
                     _filterMode = _report.TotalPingPong > 0
                         ? FilterMode.PingPongOnly
-                        : FilterMode.ConflictsOnly;
+                        : (_report.TotalOrphan + _report.TotalMultiOverride) > 0
+                            ? FilterMode.GarbageOnly
+                            : FilterMode.ConflictsOnly;
 
                     _hierarchyJob = null;
                     _pendingHierarchyReport = null;
@@ -897,6 +908,14 @@ namespace SashaRX.PrefabDoctor
                     g.PingPongCount > 0 || g.MultiOverrideCount > 0 || g.OrphanCount > 0),
                 FilterMode.LightmapOnly => FilterByCategory(OverrideCategory.Lightmap),
                 FilterMode.NetworkNoiseOnly => FilterByCategory(OverrideCategory.NetworkNoise),
+                FilterMode.TransformOnly => FilterByCategory(OverrideCategory.Transform),
+                FilterMode.GraphicsOnly => FilterByCategories(
+                    OverrideCategory.Lightmap,
+                    OverrideCategory.StaticFlags,
+                    OverrideCategory.Material,
+                    OverrideCategory.Transform),
+                FilterMode.GarbageOnly => FilterGameObjects(static g =>
+                    g.OrphanCount > 0 || g.MultiOverrideCount > 0),
                 _ => _report.GameObjects
             };
 
@@ -934,6 +953,27 @@ namespace SashaRX.PrefabDoctor
             return dst;
         }
 
+        private List<GameObjectReport> FilterByCategories(params OverrideCategory[] categories)
+        {
+            var src = _report.GameObjects;
+            var dst = new List<GameObjectReport>(src.Count);
+            for (int i = 0; i < src.Count; i++)
+            {
+                var conflicts = src[i].Conflicts;
+                bool hit = false;
+                for (int c = 0; c < conflicts.Count && !hit; c++)
+                {
+                    var cat = conflicts[c].Category;
+                    for (int k = 0; k < categories.Length; k++)
+                    {
+                        if (cat == categories[k]) { hit = true; break; }
+                    }
+                }
+                if (hit) dst.Add(src[i]);
+            }
+            return dst;
+        }
+
         private bool PassesFilter(PropertyConflict conflict)
         {
             return _filterMode switch
@@ -944,6 +984,15 @@ namespace SashaRX.PrefabDoctor
                 FilterMode.ConflictsOnly => conflict.Severity != ConflictSeverity.Insignificant,
                 FilterMode.LightmapOnly => conflict.Category == OverrideCategory.Lightmap,
                 FilterMode.NetworkNoiseOnly => conflict.Category == OverrideCategory.NetworkNoise,
+                FilterMode.TransformOnly => conflict.Category == OverrideCategory.Transform,
+                FilterMode.GraphicsOnly =>
+                    conflict.Category == OverrideCategory.Lightmap
+                    || conflict.Category == OverrideCategory.StaticFlags
+                    || conflict.Category == OverrideCategory.Material
+                    || conflict.Category == OverrideCategory.Transform,
+                FilterMode.GarbageOnly =>
+                    conflict.Severity == ConflictSeverity.Orphan
+                    || conflict.Severity == ConflictSeverity.MultiOverride,
                 _ => true
             };
         }
