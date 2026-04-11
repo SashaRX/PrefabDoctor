@@ -5,8 +5,10 @@ using Debug = UnityEngine.Debug;
 using System.Linq;
 using UnityEditor;
 using UnityEditor.IMGUI.Controls;
+using UnityEditor.UIElements;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.UIElements;
 
 namespace SashaRX.PrefabDoctor
 {
@@ -47,17 +49,14 @@ namespace SashaRX.PrefabDoctor
 
         // UI state
         private Vector2 _leftScroll;
-        private Vector2 _rightScroll;
         private int _selectedGoIndex = -1;
-        private float _splitRatio = 0.3f;
-        private bool _isDraggingSplit;
 
-        // Selection for batch ops
-        private HashSet<int> _selectedConflicts = new();
-
-        // Draw error isolation (see OnGUI try/catch)
-        private Exception _lastDrawError;
-        private bool _loggedDrawError;
+        // Selection for batch ops. Stable across left-panel GameObject
+        // switches and filter changes — the handle is (canonical GoReport
+        // index, ConflictIndex inside that GoReport), not a position in
+        // the currently visible slice. Invalidated only when _report
+        // changes by reference.
+        private readonly HashSet<ConflictHandle> _selectedConflicts = new();
 
         // Cached filtered GameObject view. OnGUI can run many times per
         // second; without this cache each repaint re-walks the report and
@@ -66,6 +65,12 @@ namespace SashaRX.PrefabDoctor
         private AnalysisReport _filteredGOCacheReport;
         private FilterMode _filteredGOCacheMode;
 
+        // Reverse map: GameObjectReport → canonical index in _report.GameObjects.
+        // Rebuilt once per new AnalysisReport so ConflictHandle can carry a
+        // stable index without walking _report.GameObjects on every lookup.
+        private Dictionary<GameObjectReport, int> _goReportIndexMap;
+        private AnalysisReport _goReportIndexMapReport;
+
         // Cached category counts — CountByCategory iterates every conflict
         // in every GameObjectReport, which on a hierarchy run with 300k+
         // objects turns into millions of operations per Repaint if invoked
@@ -73,13 +78,74 @@ namespace SashaRX.PrefabDoctor
         private Dictionary<OverrideCategory, int> _categoryCountsCache;
         private AnalysisReport _categoryCountsCacheReport;
 
-        // Hard render caps for IMGUI. IMGUI has no built-in virtualization
-        // so every row drawn runs a full layout pass; at 300k rows the
-        // window freezes at ~0.5 fps even when the report itself is done.
-        // A future UI Toolkit port (see UI_TOOLKIT_MIGRATION.md) will use
-        // MultiColumnListView and these caps become unnecessary.
+        // Hard render cap for the (still-IMGUI) left panel in Phase 1.
+        // Phase 2 replaces DrawGameObjectList with a virtualised ListView
+        // and this cap goes away.
         private const int k_MaxVisibleGOs = 500;
-        private const int k_MaxVisibleConflicts = 500;
+
+        // ── UI Toolkit elements (Phase 1 hybrid) ───────────────────
+        private VisualElement _imguiShellTop;       // tab bar + toolbar + status bar host
+        private VisualElement _instanceTab;
+        private VisualElement _scanTab;
+        private TwoPaneSplitView _instanceSplit;
+        private IMGUIContainer _leftPanelImgui;
+        private VisualElement _rightPanel;
+        private IMGUIContainer _rightPanelHeaderImgui;
+        private VisualElement _batchBar;
+        private Label _batchCountLabel;
+        private MultiColumnListView _conflictListView;
+        private IMGUIContainer _emptyStateImgui;
+
+        // Backing list for MultiColumnListView. Rebuilt on GO selection or
+        // filter change; handed to MCLV as itemsSource.
+        private readonly List<ConflictRow> _conflictRows = new();
+
+        /// <summary>
+        /// Stable reference to a single conflict across left-panel GameObject
+        /// switches and filter changes. Indices are canonical (into
+        /// <see cref="AnalysisReport.GameObjects"/> and
+        /// <see cref="GameObjectReport.Conflicts"/>), so a selection made on
+        /// GO_A survives the user clicking through GO_B, GO_C, then back.
+        /// </summary>
+        internal readonly struct ConflictHandle : IEquatable<ConflictHandle>
+        {
+            public readonly int GoReportIndex;
+            public readonly int ConflictIndex;
+
+            public ConflictHandle(int goReportIndex, int conflictIndex)
+            {
+                GoReportIndex = goReportIndex;
+                ConflictIndex = conflictIndex;
+            }
+
+            public bool Equals(ConflictHandle other) =>
+                GoReportIndex == other.GoReportIndex && ConflictIndex == other.ConflictIndex;
+
+            public override bool Equals(object obj) => obj is ConflictHandle o && Equals(o);
+
+            public override int GetHashCode() =>
+                unchecked((GoReportIndex * 397) ^ ConflictIndex);
+        }
+
+        /// <summary>
+        /// One row in the right-panel conflict list view. Holds the canonical
+        /// handle so selection persists across rebuilds, plus a direct ref to
+        /// the conflict for O(1) column binding.
+        /// </summary>
+        private readonly struct ConflictRow
+        {
+            public readonly ConflictHandle Handle;
+            public readonly PropertyConflict Conflict;
+            public readonly GameObjectReport GoReport;
+
+            public ConflictRow(ConflictHandle handle, PropertyConflict conflict,
+                GameObjectReport goReport)
+            {
+                Handle = handle;
+                Conflict = conflict;
+                GoReport = goReport;
+            }
+        }
 
         private enum FilterMode
         {
@@ -99,89 +165,126 @@ namespace SashaRX.PrefabDoctor
         }
 
         // ── Main Layout ────────────────────────────────────────────
+        //
+        // Phase 1 hybrid: the window's root is a UI Toolkit VisualElement
+        // tree, but everything except the right-panel conflict list is
+        // still drawn via IMGUIContainer — we have not rewritten the
+        // toolbar, status bar, left panel, or project scan panel yet. The
+        // big win is that the right panel's conflict table is now a real
+        // MultiColumnListView with full row virtualisation, which both
+        // removes the k_MaxVisibleConflicts row cap and lets the batch
+        // selection carry a stable ConflictHandle across GameObject
+        // switches and filter changes. Phase 2 will port the rest.
 
-        private void OnGUI()
+        private void CreateGUI()
         {
-            // If a previous draw threw, short-circuit to an error panel so IMGUI's
-            // Begin/End stack cannot be corrupted by retrying the broken path.
-            if (_lastDrawError != null)
+            var root = rootVisualElement;
+            root.style.flexDirection = FlexDirection.Column;
+
+            // Tab bar + toolbar + status bar live in a single IMGUIContainer
+            // that renders the pre-existing DrawToolbar / DrawStatusBar
+            // paths. The tab bar itself is drawn here too so tab switching
+            // stays entirely IMGUI-controlled until Phase 2.
+            _imguiShellTop = new IMGUIContainer(DrawShellTopImgui);
+            _imguiShellTop.style.flexShrink = 0;
+            root.Add(_imguiShellTop);
+
+            // Instance Analysis tab body.
+            _instanceTab = new VisualElement();
+            _instanceTab.style.flexGrow = 1;
+            _instanceTab.style.flexDirection = FlexDirection.Column;
+            root.Add(_instanceTab);
+
+            // Empty state host: shown when the report is null or has no
+            // GameObjectReports. Same DrawEmptyState body as before.
+            _emptyStateImgui = new IMGUIContainer(DrawEmptyState);
+            _emptyStateImgui.style.flexGrow = 1;
+            _instanceTab.Add(_emptyStateImgui);
+
+            // Split view is mounted on demand so TwoPaneSplitView always
+            // has exactly its two required children and the empty state
+            // path does not need to fight it for layout.
+            _instanceSplit = new TwoPaneSplitView(
+                fixedPaneIndex: 0,
+                fixedPaneStartDimension: 260f,
+                orientation: TwoPaneSplitViewOrientation.Horizontal)
             {
-                DrawDrawErrorState();
-                return;
-            }
+                viewDataKey = "prefab-doctor-instance-split"
+            };
+            _instanceSplit.style.flexGrow = 1;
+            _instanceSplit.style.display = DisplayStyle.None;
+            _instanceTab.Add(_instanceSplit);
 
-            try
-            {
-                // Tab bar
-                _activeTab = GUILayout.Toolbar(_activeTab, s_TabNames, GUILayout.Height(22));
+            _leftPanelImgui = new IMGUIContainer(DrawGameObjectListScrolled);
+            _leftPanelImgui.style.flexGrow = 1;
+            _instanceSplit.Add(_leftPanelImgui);
 
-                if (_activeTab == 1)
-                {
-                    _scanPanel.OnGUI();
-                    return;
-                }
+            _rightPanel = BuildRightPanel();
+            _instanceSplit.Add(_rightPanel);
 
-                // Instance Analysis tab
-                DrawToolbar();
-                DrawStatusBar();
+            // Project Scan tab body — still 100% IMGUI.
+            _scanTab = new VisualElement();
+            _scanTab.style.flexGrow = 1;
+            _scanTab.style.display = DisplayStyle.None;
+            var scanImgui = new IMGUIContainer(() => _scanPanel.OnGUI());
+            scanImgui.style.flexGrow = 1;
+            _scanTab.Add(scanImgui);
+            root.Add(_scanTab);
 
-                if (_report == null || _report.GameObjects.Count == 0)
-                {
-                    DrawEmptyState();
-                    return;
-                }
-
-                // Simple horizontal split — no manual rect math
-                float leftWidth = position.width * _splitRatio;
-
-                EditorGUILayout.BeginHorizontal();
-
-                // Left panel: GameObject tree
-                _leftScroll = EditorGUILayout.BeginScrollView(_leftScroll,
-                    GUILayout.Width(leftWidth), GUILayout.ExpandHeight(true));
-                DrawGameObjectList();
-                EditorGUILayout.EndScrollView();
-
-                // Right panel: Conflict table
-                _rightScroll = EditorGUILayout.BeginScrollView(_rightScroll,
-                    GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
-                DrawConflictList();
-                EditorGUILayout.EndScrollView();
-
-                EditorGUILayout.EndHorizontal();
-            }
-            catch (Exception ex)
-            {
-                _lastDrawError = ex;
-                if (!_loggedDrawError)
-                {
-                    _loggedDrawError = true;
-                    Debug.LogError($"[Prefab Doctor] OnGUI failed: {ex}");
-                }
-                Repaint();
-            }
+            RefreshTabVisibility();
+            RebuildConflictList();
+            UpdateBatchBar();
         }
 
-        private void DrawDrawErrorState()
+        /// <summary>
+        /// IMGUI shell that draws the tab bar + (on the instance tab) the
+        /// toolbar and status bar. Auto-height because it adapts to which
+        /// sub-sections draw based on current state.
+        /// </summary>
+        private void DrawShellTopImgui()
         {
-            EditorGUILayout.Space(8);
-            EditorGUILayout.HelpBox(
-                "Prefab Doctor hit a draw error and paused the window to protect Unity's IMGUI layout.\n\n"
-                + _lastDrawError.Message,
-                MessageType.Error);
+            // Tab bar
+            int newTab = GUILayout.Toolbar(_activeTab, s_TabNames, GUILayout.Height(22));
+            if (newTab != _activeTab)
+            {
+                _activeTab = newTab;
+                RefreshTabVisibility();
+            }
 
-            EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Retry", GUILayout.Width(80)))
-            {
-                _lastDrawError = null;
-                _loggedDrawError = false;
-                Repaint();
-            }
-            if (GUILayout.Button("Copy details", GUILayout.Width(110)))
-            {
-                EditorGUIUtility.systemCopyBuffer = _lastDrawError.ToString();
-            }
-            EditorGUILayout.EndHorizontal();
+            if (_activeTab != 0) return;
+
+            DrawToolbar();
+            DrawStatusBar();
+
+            // Layout visibility for the body: either the split view (with
+            // the conflict list) or the empty state, but never both.
+            bool haveReport = _report != null && _report.GameObjects.Count > 0;
+            SetDisplay(_instanceSplit, haveReport);
+            SetDisplay(_emptyStateImgui, !haveReport);
+        }
+
+        private void RefreshTabVisibility()
+        {
+            if (_instanceTab == null) return;
+            SetDisplay(_instanceTab, _activeTab == 0);
+            SetDisplay(_scanTab, _activeTab == 1);
+        }
+
+        private static void SetDisplay(VisualElement element, bool visible)
+        {
+            if (element == null) return;
+            element.style.display = visible ? DisplayStyle.Flex : DisplayStyle.None;
+        }
+
+        /// <summary>
+        /// IMGUI left-panel wrapper that preserves the legacy scroll view.
+        /// Phase 2 replaces this with a ListView.
+        /// </summary>
+        private void DrawGameObjectListScrolled()
+        {
+            _leftScroll = EditorGUILayout.BeginScrollView(_leftScroll);
+            DrawGameObjectList();
+            EditorGUILayout.EndScrollView();
         }
 
         // ── Toolbar ────────────────────────────────────────────────
@@ -227,9 +330,16 @@ namespace SashaRX.PrefabDoctor
 
             GUILayout.Space(8);
 
-            // Filter mode
-            _filterMode = (FilterMode)EditorGUILayout.EnumPopup(_filterMode,
+            // Filter mode — rebuild conflict list on change so the
+            // MultiColumnListView picks up the new set. Selection
+            // (by stable ConflictHandle) survives the rebuild.
+            var newFilter = (FilterMode)EditorGUILayout.EnumPopup(_filterMode,
                 EditorStyles.toolbarDropDown, GUILayout.Width(130));
+            if (newFilter != _filterMode)
+            {
+                _filterMode = newFilter;
+                RebuildConflictList();
+            }
 
             GUILayout.FlexibleSpace();
 
@@ -432,7 +542,14 @@ namespace SashaRX.PrefabDoctor
                 if (GUILayout.Button(displayName, EditorStyles.label))
                 {
                     _selectedGoIndex = i;
-                    _selectedConflicts.Clear();
+
+                    // Phase 1: selection is keyed by stable ConflictHandle,
+                    // so switching left-panel GameObject no longer clears
+                    // the set. Previously-picked conflicts on other GOs
+                    // stay in the batch until the user reverts or explicitly
+                    // presses Select None. Rebuild the MCLV source for the
+                    // new GameObject and push stored selection back in.
+                    RebuildConflictList();
 
                     // Ping + select the actual scene GameObject so the user
                     // can jump straight from a row in the conflict list to
@@ -540,19 +657,191 @@ namespace SashaRX.PrefabDoctor
 
         // ── Right Panel: Conflict Table ────────────────────────────
 
-        private void DrawConflictList()
+        // ── Right Panel: UI Toolkit Conflict Table ─────────────────
+
+        /// <summary>
+        /// Build the right-panel subtree: GameObject header (still IMGUI
+        /// for Phase 1), batch action toolbar, and the virtualised
+        /// MultiColumnListView that replaces the old IMGUI DrawConflictList.
+        /// </summary>
+        private VisualElement BuildRightPanel()
         {
+            var panel = new VisualElement();
+            panel.style.flexGrow = 1;
+            panel.style.flexDirection = FlexDirection.Column;
+
+            _rightPanelHeaderImgui = new IMGUIContainer(DrawConflictListHeaderImgui);
+            _rightPanelHeaderImgui.style.flexShrink = 0;
+            panel.Add(_rightPanelHeaderImgui);
+
+            _batchBar = BuildBatchBar();
+            panel.Add(_batchBar);
+
+            var columns = new Columns();
+
+            var sevCol = new Column { name = "sev", title = "Sev", stretchable = false };
+            sevCol.width = 40f;
+            sevCol.makeCell = MakeLabelCell;
+            sevCol.bindCell = BindSevCell;
+            columns.Add(sevCol);
+
+            var catCol = new Column { name = "cat", title = "Cat", stretchable = false };
+            catCol.width = 80f;
+            catCol.makeCell = MakeLabelCell;
+            catCol.bindCell = BindCatCell;
+            columns.Add(catCol);
+
+            var compCol = new Column { name = "comp", title = "Component", stretchable = false };
+            compCol.width = 140f;
+            compCol.makeCell = MakeLabelCell;
+            compCol.bindCell = BindCompCell;
+            columns.Add(compCol);
+
+            var propCol = new Column { name = "prop", title = "Property", stretchable = false };
+            propCol.width = 240f;
+            propCol.makeCell = MakeLabelCell;
+            propCol.bindCell = BindPropCell;
+            columns.Add(propCol);
+
+            var valsCol = new Column { name = "vals", title = "Values by depth", stretchable = true };
+            valsCol.minWidth = 200f;
+            valsCol.makeCell = MakeLabelCell;
+            valsCol.bindCell = BindValsCell;
+            columns.Add(valsCol);
+
+            _conflictListView = new MultiColumnListView(columns)
+            {
+                itemsSource = _conflictRows,
+                selectionType = SelectionType.Multiple,
+                reorderable = false,
+                fixedItemHeight = 20f,
+                showBorder = true,
+                showBoundCollectionSize = false,
+                showFoldoutHeader = false,
+                showAlternatingRowBackgrounds = AlternatingRowBackground.None,
+                horizontalScrollingEnabled = false,
+                virtualizationMethod = CollectionVirtualizationMethod.FixedHeight,
+                viewDataKey = "prefab-doctor-conflict-list"
+            };
+            _conflictListView.style.flexGrow = 1;
+            _conflictListView.selectionChanged += OnConflictListSelectionChanged;
+            panel.Add(_conflictListView);
+
+            return panel;
+        }
+
+        private Label MakeLabelCell()
+        {
+            var lbl = new Label
+            {
+                style =
+                {
+                    unityTextAlign = TextAnchor.MiddleLeft,
+                    marginLeft = 4,
+                    marginRight = 4,
+                    overflow = Overflow.Hidden,
+                    textOverflow = TextOverflow.Ellipsis,
+                    whiteSpace = WhiteSpace.NoWrap
+                }
+            };
+            lbl.AddManipulator(new ContextualMenuManipulator(PopulateRowContextMenu));
+            return lbl;
+        }
+
+        private void BindSevCell(VisualElement element, int index)
+        {
+            var lbl = (Label)element;
+            if (index < 0 || index >= _conflictRows.Count) { lbl.text = ""; return; }
+            var row = _conflictRows[index];
+            lbl.userData = index;
+
+            lbl.text = row.Conflict.Severity switch
+            {
+                ConflictSeverity.PingPong => "PP",
+                ConflictSeverity.MultiOverride => "M",
+                ConflictSeverity.Orphan => "O",
+                ConflictSeverity.Insignificant => "~",
+                _ => "?"
+            };
+            lbl.style.color = row.Conflict.Severity switch
+            {
+                ConflictSeverity.PingPong => new Color(1f, 0.45f, 0.45f),
+                ConflictSeverity.MultiOverride => new Color(1f, 0.78f, 0.25f),
+                ConflictSeverity.Orphan => new Color(0.75f, 0.75f, 0.75f),
+                ConflictSeverity.Insignificant => new Color(0.55f, 0.82f, 1f),
+                _ => new Color(0.85f, 0.85f, 0.85f)
+            };
+            lbl.style.unityFontStyleAndWeight = FontStyle.Bold;
+        }
+
+        private void BindCatCell(VisualElement element, int index)
+        {
+            var lbl = (Label)element;
+            if (index < 0 || index >= _conflictRows.Count) { lbl.text = ""; return; }
+            var row = _conflictRows[index];
+            lbl.userData = index;
+            lbl.text = row.Conflict.Category.ToString();
+            lbl.style.color = row.Conflict.Category switch
+            {
+                OverrideCategory.Lightmap => new Color(1f, 0.9f, 0.35f),
+                OverrideCategory.NetworkNoise => new Color(0.45f, 0.9f, 0.7f),
+                OverrideCategory.StaticFlags => new Color(0.82f, 0.7f, 1f),
+                OverrideCategory.Transform => new Color(0.75f, 0.85f, 1f),
+                OverrideCategory.Material => new Color(1f, 0.7f, 0.9f),
+                OverrideCategory.Name => new Color(0.95f, 0.85f, 0.6f),
+                _ => new Color(0.78f, 0.78f, 0.78f)
+            };
+            lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
+        }
+
+        private void BindCompCell(VisualElement element, int index)
+        {
+            var lbl = (Label)element;
+            if (index < 0 || index >= _conflictRows.Count) { lbl.text = ""; return; }
+            var row = _conflictRows[index];
+            lbl.userData = index;
+            lbl.text = row.Conflict.Key.ComponentType;
+            lbl.style.color = new Color(0.85f, 0.85f, 0.85f);
+            lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
+        }
+
+        private void BindPropCell(VisualElement element, int index)
+        {
+            var lbl = (Label)element;
+            if (index < 0 || index >= _conflictRows.Count) { lbl.text = ""; return; }
+            var row = _conflictRows[index];
+            lbl.userData = index;
+            lbl.text = row.Conflict.Key.PropertyPath;
+            lbl.style.color = new Color(0.85f, 0.85f, 0.85f);
+            lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
+        }
+
+        private void BindValsCell(VisualElement element, int index)
+        {
+            var lbl = (Label)element;
+            if (index < 0 || index >= _conflictRows.Count) { lbl.text = ""; return; }
+            var row = _conflictRows[index];
+            lbl.userData = index;
+            lbl.text = string.Join(" → ", row.Conflict.Overrides.Select(o =>
+                $"D{o.Depth}:{TruncateValue(o.Value, 12)}"));
+            lbl.style.color = new Color(0.8f, 0.8f, 0.8f);
+            lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
+        }
+
+        private void DrawConflictListHeaderImgui()
+        {
+            if (_report == null) return;
+
             var filteredGOs = GetFilteredGameObjects();
             if (_selectedGoIndex < 0 || _selectedGoIndex >= filteredGOs.Count)
             {
-                EditorGUILayout.HelpBox("Select a GameObject on the left to view overrides.",
+                EditorGUILayout.HelpBox(
+                    "Select a GameObject on the left to view its overrides.",
                     MessageType.Info);
                 return;
             }
 
             var goReport = filteredGOs[_selectedGoIndex];
-
-            // Header
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField(goReport.RelativePath, EditorStyles.boldLabel);
             if (goReport.Instance != null &&
@@ -562,167 +851,355 @@ namespace SashaRX.PrefabDoctor
                 Selection.activeGameObject = goReport.Instance;
             }
             EditorGUILayout.EndHorizontal();
+        }
 
-            // Batch action bar
-            if (_selectedConflicts.Count > 0)
+        // ── Batch action bar ───────────────────────────────────────
+
+        private VisualElement BuildBatchBar()
+        {
+            var bar = new VisualElement();
+            bar.style.flexDirection = FlexDirection.Row;
+            bar.style.alignItems = Align.Center;
+            bar.style.flexShrink = 0;
+            bar.style.paddingLeft = 4;
+            bar.style.paddingRight = 4;
+            bar.style.paddingTop = 2;
+            bar.style.paddingBottom = 2;
+            bar.style.borderBottomWidth = 1;
+            bar.style.borderBottomColor = new Color(0f, 0f, 0f, 0.3f);
+            bar.style.backgroundColor = new Color(0.16f, 0.16f, 0.16f, 0.35f);
+
+            _batchCountLabel = new Label("0 selected");
+            _batchCountLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+            _batchCountLabel.style.marginRight = 8;
+            _batchCountLabel.style.minWidth = 140;
+            bar.Add(_batchCountLabel);
+
+            var selectAll = new Button(SelectAllVisible) { text = "Select All Visible" };
+            selectAll.style.marginLeft = 0;
+            bar.Add(selectAll);
+
+            var selectNone = new Button(SelectNone) { text = "Select None" };
+            bar.Add(selectNone);
+
+            var spacer = new VisualElement { style = { flexGrow = 1 } };
+            bar.Add(spacer);
+
+            var revert = new Button(RevertSelected) { text = "Revert Selected" };
+            revert.style.color = new Color(1f, 0.85f, 0.55f);
+            bar.Add(revert);
+
+            var copy = new Button(CopySelectedPropertyPaths) { text = "Copy Paths" };
+            bar.Add(copy);
+
+            return bar;
+        }
+
+        private void UpdateBatchBar()
+        {
+            if (_batchCountLabel == null) return;
+
+            int total = _selectedConflicts.Count;
+            if (total == 0)
             {
-                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-                GUILayout.Label($"{_selectedConflicts.Count} selected", EditorStyles.miniLabel);
-                if (GUILayout.Button("Revert Selected", EditorStyles.miniButton, GUILayout.Width(100)))
-                {
-                    var toRevert = _selectedConflicts
-                        .Select(idx => goReport.Conflicts[idx])
-                        .ToList();
-                    OverrideActions.BatchRevert(_target, toRevert);
-                    RunAnalysis();
-                }
-                EditorGUILayout.EndHorizontal();
+                _batchCountLabel.text = "0 selected";
+                _batchCountLabel.style.color = new Color(0.6f, 0.6f, 0.6f);
+                return;
             }
 
-            // Column headers
-            EditorGUILayout.BeginHorizontal("box");
-            GUILayout.Label("Sev", EditorStyles.miniBoldLabel, GUILayout.Width(30));
-            GUILayout.Label("Component", EditorStyles.miniBoldLabel, GUILayout.Width(100));
-            GUILayout.Label("Property", EditorStyles.miniBoldLabel, GUILayout.Width(160));
-            GUILayout.Label("Values by depth", EditorStyles.miniBoldLabel);
-            EditorGUILayout.EndHorizontal();
+            // Count distinct GameObjects represented in the selection.
+            var goSet = new HashSet<int>();
+            foreach (var h in _selectedConflicts) goSet.Add(h.GoReportIndex);
+            int goCount = goSet.Count;
 
-            // Rows — capped at k_MaxVisibleConflicts to keep IMGUI layout
-            // fast on hierarchy reports with tens of thousands of rows on
-            // a single selected GameObject.
-            int drawn = 0;
-            int hiddenByCap = 0;
-            for (int i = 0; i < goReport.Conflicts.Count; i++)
+            _batchCountLabel.text = goCount > 1
+                ? $"{total} selected · {goCount} GameObjects"
+                : $"{total} selected";
+            _batchCountLabel.style.color = new Color(0.95f, 0.85f, 0.45f);
+        }
+
+        // ── Conflict list rebuild + selection sync ─────────────────
+
+        private bool _muteSelectionSync;
+
+        /// <summary>
+        /// Rebuild the MCLV's itemsSource from the currently selected
+        /// left-panel GameObject and the active filter. Called on GO
+        /// change, filter change, and after every analysis run. Selection
+        /// for the current GO is pushed back into MCLV's internal
+        /// selection state; selections for other GameObjects stay in
+        /// _selectedConflicts untouched (cross-GO batch).
+        /// </summary>
+        private void RebuildConflictList()
+        {
+            if (_conflictListView == null) return;
+            _conflictRows.Clear();
+
+            if (_report != null && _selectedGoIndex >= 0)
             {
-                var conflict = goReport.Conflicts[i];
-
-                // Apply filter mode
-                if (!PassesFilter(conflict)) continue;
-
-                if (drawn >= k_MaxVisibleConflicts)
+                var filteredGOs = GetFilteredGameObjects();
+                if (_selectedGoIndex < filteredGOs.Count)
                 {
-                    hiddenByCap++;
-                    continue;
-                }
-                drawn++;
-
-                Color rowColor = conflict.Severity switch
-                {
-                    ConflictSeverity.PingPong => new Color(1f, 0.3f, 0.3f, 0.15f),
-                    ConflictSeverity.MultiOverride => new Color(1f, 0.7f, 0f, 0.1f),
-                    ConflictSeverity.Orphan => new Color(0.5f, 0.5f, 0.5f, 0.1f),
-                    ConflictSeverity.Insignificant => new Color(0.5f, 0.8f, 1f, 0.08f),
-                    _ => Color.clear
-                };
-
-                var rowRect = EditorGUILayout.BeginHorizontal();
-                EditorGUI.DrawRect(rowRect, rowColor);
-
-                // Checkbox
-                bool wasSelected = _selectedConflicts.Contains(i);
-                bool isSelected = GUILayout.Toggle(wasSelected, "", GUILayout.Width(16));
-                if (isSelected != wasSelected)
-                {
-                    if (isSelected) _selectedConflicts.Add(i);
-                    else _selectedConflicts.Remove(i);
-                }
-
-                // Severity badge
-                string sevLabel = conflict.Severity switch
-                {
-                    ConflictSeverity.PingPong => "PP",
-                    ConflictSeverity.MultiOverride => "M",
-                    ConflictSeverity.Orphan => "O",
-                    ConflictSeverity.Insignificant => "~",
-                    _ => "?"
-                };
-                GUILayout.Label(sevLabel, EditorStyles.miniBoldLabel, GUILayout.Width(30));
-
-                // Component & Property
-                GUILayout.Label(conflict.Key.ComponentType, EditorStyles.miniLabel,
-                    GUILayout.Width(100));
-                GUILayout.Label(conflict.Key.PropertyPath, EditorStyles.miniLabel,
-                    GUILayout.Width(160));
-
-                // Values — compact inline display
-                string valuesStr = string.Join(" → ",
-                    conflict.Overrides.Select(o =>
+                    var goReport = filteredGOs[_selectedGoIndex];
+                    int canonicalGoIndex = GetCanonicalGoIndex(goReport);
+                    if (canonicalGoIndex >= 0)
                     {
-                        string v = TruncateValue(o.Value, 12);
-                        return $"D{o.Depth}:{v}";
-                    }));
-                GUILayout.Label(valuesStr, EditorStyles.miniLabel);
-
-                EditorGUILayout.EndHorizontal();
-
-                // Context menu on right-click
-                if (Event.current.type == EventType.ContextClick &&
-                    rowRect.Contains(Event.current.mousePosition))
-                {
-                    ShowConflictContextMenu(conflict, i, goReport);
-                    Event.current.Use();
+                        var conflicts = goReport.Conflicts;
+                        for (int i = 0; i < conflicts.Count; i++)
+                        {
+                            var c = conflicts[i];
+                            if (!PassesFilter(c)) continue;
+                            _conflictRows.Add(new ConflictRow(
+                                new ConflictHandle(canonicalGoIndex, i), c, goReport));
+                        }
+                    }
                 }
             }
 
-            if (hiddenByCap > 0)
+            _conflictListView.itemsSource = _conflictRows;
+            _conflictListView.RefreshItems();
+            PushSelectionToListView();
+            UpdateBatchBar();
+        }
+
+        /// <summary>
+        /// Mirror MCLV's current selection into _selectedConflicts for
+        /// handles belonging to the currently displayed GameObject. Handles
+        /// for other GameObjects are left alone.
+        /// </summary>
+        private void OnConflictListSelectionChanged(IEnumerable<object> _)
+        {
+            if (_muteSelectionSync || _report == null) return;
+
+            int canonicalGoIndex = GetCurrentCanonicalGoIndex();
+            if (canonicalGoIndex < 0) return;
+
+            _selectedConflicts.RemoveWhere(h => h.GoReportIndex == canonicalGoIndex);
+
+            foreach (int rowIdx in _conflictListView.selectedIndices)
             {
-                EditorGUILayout.Space(4);
-                EditorGUILayout.HelpBox(
-                    $"Showing first {drawn} of {drawn + hiddenByCap} matching conflicts.\n"
-                    + "Narrow the filter (PingPongOnly / a category) to see fewer rows, "
-                    + "or use Copy Report for the full list.",
-                    MessageType.Info);
+                if (rowIdx >= 0 && rowIdx < _conflictRows.Count)
+                    _selectedConflicts.Add(_conflictRows[rowIdx].Handle);
+            }
+
+            UpdateBatchBar();
+        }
+
+        /// <summary>
+        /// Push stored selection for the currently displayed GameObject
+        /// into MCLV's visible selection. Wrapped in _muteSelectionSync
+        /// so the resulting selectionChanged callback does not echo back.
+        /// </summary>
+        private void PushSelectionToListView()
+        {
+            if (_conflictListView == null) return;
+
+            int canonicalGoIndex = GetCurrentCanonicalGoIndex();
+            var indices = new List<int>();
+            if (canonicalGoIndex >= 0)
+            {
+                for (int i = 0; i < _conflictRows.Count; i++)
+                {
+                    if (_selectedConflicts.Contains(_conflictRows[i].Handle))
+                        indices.Add(i);
+                }
+            }
+
+            _muteSelectionSync = true;
+            try
+            {
+                _conflictListView.SetSelectionWithoutNotify(indices);
+            }
+            finally
+            {
+                _muteSelectionSync = false;
             }
         }
 
-        // ── Context Menu ───────────────────────────────────────────
-
-        private void ShowConflictContextMenu(PropertyConflict conflict, int index,
-            GameObjectReport goReport)
+        private int GetCurrentCanonicalGoIndex()
         {
-            var menu = new GenericMenu();
+            if (_report == null || _selectedGoIndex < 0) return -1;
+            var filteredGOs = GetFilteredGameObjects();
+            if (_selectedGoIndex >= filteredGOs.Count) return -1;
+            return GetCanonicalGoIndex(filteredGOs[_selectedGoIndex]);
+        }
 
-            menu.AddItem(new GUIContent("Revert All (return to base)"), false, () =>
+        private int GetCanonicalGoIndex(GameObjectReport goReport)
+        {
+            if (_report == null) return -1;
+            if (_goReportIndexMap == null
+                || !ReferenceEquals(_goReportIndexMapReport, _report))
             {
-                OverrideActions.RevertAll(_target, conflict);
+                _goReportIndexMap = new Dictionary<GameObjectReport, int>(
+                    _report.GameObjects.Count);
+                for (int i = 0; i < _report.GameObjects.Count; i++)
+                    _goReportIndexMap[_report.GameObjects[i]] = i;
+                _goReportIndexMapReport = _report;
+            }
+            return _goReportIndexMap.TryGetValue(goReport, out var idx) ? idx : -1;
+        }
+
+        // ── Batch action handlers ──────────────────────────────────
+
+        private void SelectAllVisible()
+        {
+            foreach (var row in _conflictRows)
+                _selectedConflicts.Add(row.Handle);
+            PushSelectionToListView();
+            UpdateBatchBar();
+        }
+
+        private void SelectNone()
+        {
+            _selectedConflicts.Clear();
+            PushSelectionToListView();
+            UpdateBatchBar();
+        }
+
+        private void RevertSelected()
+        {
+            if (_selectedConflicts.Count == 0 || _report == null) return;
+
+            var tasks = ResolveBatchTasks(_selectedConflicts).ToList();
+            if (tasks.Count == 0)
+            {
+                Debug.LogWarning("[Prefab Doctor] Revert Selected: "
+                    + "nothing resolved to a valid PrefabInstance root.");
+                return;
+            }
+
+            OverrideActions.BatchRevert(tasks);
+            Debug.Log($"[Prefab Doctor] Batch reverted {tasks.Count} conflicts");
+
+            if (_report.IsHierarchyMode)
+                RunHierarchyAnalysis();
+            else
                 RunAnalysis();
+        }
+
+        private void CopySelectedPropertyPaths()
+        {
+            if (_selectedConflicts.Count == 0 || _report == null) return;
+
+            var sb = new System.Text.StringBuilder(_selectedConflicts.Count * 48);
+            foreach (var handle in _selectedConflicts)
+            {
+                if (handle.GoReportIndex < 0
+                    || handle.GoReportIndex >= _report.GameObjects.Count) continue;
+                var go = _report.GameObjects[handle.GoReportIndex];
+                if (handle.ConflictIndex < 0
+                    || handle.ConflictIndex >= go.Conflicts.Count) continue;
+                var c = go.Conflicts[handle.ConflictIndex];
+                sb.Append(go.RelativePath).Append('/')
+                  .Append(c.Key.ComponentType).Append("::")
+                  .Append(c.Key.PropertyPath).Append('\n');
+            }
+
+            EditorGUIUtility.systemCopyBuffer = sb.ToString();
+            Debug.Log($"[Prefab Doctor] Copied {_selectedConflicts.Count} property paths "
+                + "to clipboard");
+        }
+
+        /// <summary>
+        /// Resolve every selected conflict into the
+        /// <c>(instanceRoot, conflict)</c> pair expected by the new
+        /// <see cref="OverrideActions.BatchRevert(IEnumerable{ValueTuple{GameObject, PropertyConflict}})"/>
+        /// overload. In hierarchy mode each conflict is pinned to its own
+        /// nested PrefabInstance root (resolved via
+        /// <see cref="ResolveByRelativePath"/> + <c>GetNearestPrefabInstanceRoot</c>).
+        /// In instance mode every conflict shares <c>_target</c>.
+        /// </summary>
+        private IEnumerable<(GameObject instanceRoot, PropertyConflict conflict)>
+            ResolveBatchTasks(IEnumerable<ConflictHandle> handles)
+        {
+            if (_report == null) yield break;
+
+            foreach (var handle in handles)
+            {
+                if (handle.GoReportIndex < 0
+                    || handle.GoReportIndex >= _report.GameObjects.Count) continue;
+                var go = _report.GameObjects[handle.GoReportIndex];
+
+                if (handle.ConflictIndex < 0
+                    || handle.ConflictIndex >= go.Conflicts.Count) continue;
+                var conflict = go.Conflicts[handle.ConflictIndex];
+
+                GameObject instanceRoot;
+                if (_report.IsHierarchyMode)
+                {
+                    var sceneGo = ResolveByRelativePath(go.RelativePath);
+                    if (sceneGo == null) continue;
+                    instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(sceneGo);
+                    if (instanceRoot == null) continue;
+                }
+                else
+                {
+                    instanceRoot = _target;
+                    if (instanceRoot == null) continue;
+                }
+
+                yield return (instanceRoot, conflict);
+            }
+        }
+
+        // ── Row context menu ───────────────────────────────────────
+
+        private void PopulateRowContextMenu(ContextualMenuPopulateEvent evt)
+        {
+            if (!(evt.target is VisualElement ve) || !(ve.userData is int rowIdx)) return;
+            if (rowIdx < 0 || rowIdx >= _conflictRows.Count) return;
+
+            var row = _conflictRows[rowIdx];
+            var conflict = row.Conflict;
+
+            evt.menu.AppendAction("Revert All (return to base)", _ =>
+            {
+                // Route through the new tasks overload so hierarchy mode
+                // resolves to the right nested instance owner.
+                var tasks = ResolveBatchTasks(new[] { row.Handle }).ToList();
+                if (tasks.Count == 0) return;
+                OverrideActions.BatchRevert(tasks);
+                if (_report != null && _report.IsHierarchyMode) RunHierarchyAnalysis();
+                else RunAnalysis();
             });
 
-            menu.AddSeparator("");
+            evt.menu.AppendSeparator();
 
-            // "Keep only at depth N" for each depth that has an override
             foreach (var entry in conflict.Overrides)
             {
-                var level = _report.Chain.FirstOrDefault(l => l.Depth == entry.Depth);
-                string name = level.IsSceneInstance ? "Scene" :
-                    System.IO.Path.GetFileNameWithoutExtension(level.AssetPath);
+                var level = _report?.Chain.FirstOrDefault(l => l.Depth == entry.Depth);
+                string name = level.HasValue && level.Value.IsSceneInstance
+                    ? "Scene"
+                    : (level.HasValue
+                        ? System.IO.Path.GetFileNameWithoutExtension(level.Value.AssetPath)
+                        : "?");
                 int capturedDepth = entry.Depth;
                 string capturedValue = TruncateValue(entry.Value, 20);
-
-                menu.AddItem(
-                    new GUIContent($"Keep only at D{capturedDepth} ({name}) = {capturedValue}"),
-                    false, () =>
+                evt.menu.AppendAction(
+                    $"Keep only at D{capturedDepth} ({name}) = {capturedValue}",
+                    _ =>
                     {
                         OverrideActions.KeepOnlyAtDepth(_target, conflict, capturedDepth);
-                        RunAnalysis();
+                        if (_report != null && _report.IsHierarchyMode) RunHierarchyAnalysis();
+                        else RunAnalysis();
                     });
             }
 
-            menu.AddSeparator("");
+            evt.menu.AppendSeparator();
 
-            // Select/deselect
-            if (_selectedConflicts.Contains(index))
-                menu.AddItem(new GUIContent("Deselect"), false, () => _selectedConflicts.Remove(index));
-            else
-                menu.AddItem(new GUIContent("Select"), false, () => _selectedConflicts.Add(index));
+            bool isSelected = _selectedConflicts.Contains(row.Handle);
+            evt.menu.AppendAction(isSelected ? "Deselect" : "Select", _ =>
+            {
+                if (isSelected) _selectedConflicts.Remove(row.Handle);
+                else _selectedConflicts.Add(row.Handle);
+                PushSelectionToListView();
+                UpdateBatchBar();
+            });
 
-            // Copy info
-            menu.AddItem(new GUIContent("Copy property path"), false, () =>
+            evt.menu.AppendAction("Copy property path", _ =>
             {
                 EditorGUIUtility.systemCopyBuffer = conflict.Key.PropertyPath;
             });
-
-            menu.ShowAsContext();
         }
 
         // ── Helpers ────────────────────────────────────────────────
@@ -773,6 +1250,7 @@ namespace SashaRX.PrefabDoctor
                 _report = _analyzer.Analyze(_target, _subtreeRoot);
                 _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
                 _selectedConflicts.Clear();
+                RebuildConflictList();
             }
 
             Repaint();
@@ -883,6 +1361,7 @@ namespace SashaRX.PrefabDoctor
                         + $"{_report.TotalInsignificant} insignificant, "
                         + $"{_report.AnalysisTimeMs:F0}ms");
 
+                    RebuildConflictList();
                     Repaint();
                     return;
                 }
@@ -965,6 +1444,7 @@ namespace SashaRX.PrefabDoctor
                     _incrementalJob = null;
                     _pendingReport = null;
                     EditorApplication.update -= PumpIncrementalJob;
+                    RebuildConflictList();
                     Repaint();
                     return;
                 }
