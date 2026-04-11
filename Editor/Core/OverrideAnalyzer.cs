@@ -272,57 +272,81 @@ namespace SashaRX.PrefabDoctor
         /// Results are merged into a single report with full hierarchy paths.
         /// This is the "full picture" mode — shows every override at every level
         /// for every nested prefab in the entire tree.
+        ///
+        /// Synchronous wrapper around <see cref="AnalyzeHierarchyIncremental"/>
+        /// for callers that do not need cancelation or progress — internally
+        /// this just pumps the enumerator to completion. The editor will
+        /// freeze while it runs; prefer the incremental path from the window.
         /// </summary>
         public AnalysisReport AnalyzeHierarchy(GameObject root)
         {
+            var report = new AnalysisReport();
+            var job = AnalyzeHierarchyIncremental(root, report);
+            while (job.MoveNext()) { /* pump to completion */ }
+            return report;
+        }
+
+        /// <summary>
+        /// Incremental variant of <see cref="AnalyzeHierarchy"/>. Yields a
+        /// float progress in [0..1] after each analyzed PrefabInstance root,
+        /// so the caller can pump it via <c>EditorApplication.update</c> and
+        /// keep the editor responsive. Always yields a final 1f once the
+        /// report is fully populated.
+        ///
+        /// Cancelation: if the caller stops pumping and invokes
+        /// <see cref="AbortRun"/>, the per-run caches (SerializedObject cache,
+        /// ignore snapshot, GO/component caches) are released. Without
+        /// calling AbortRun on a cancelled run those caches leak for the
+        /// rest of the editor session.
+        /// </summary>
+        public IEnumerator<float> AnalyzeHierarchyIncremental(
+            GameObject root, AnalysisReport report)
+        {
             var sw = Stopwatch.StartNew();
-            var report = new AnalysisReport
-            {
-                AnalyzedRoot = root,
-                IsHierarchyMode = true
-            };
+            report.AnalyzedRoot = root;
+            report.IsHierarchyMode = true;
 
             BeginRun();
-            try
+
+            // Find all PrefabInstance roots recursively.
+            var instanceRoots = new List<(GameObject go, string hierarchyPath)>();
+            CollectPrefabInstanceRoots(root.transform, "", instanceRoots);
+
+            // Also include the root itself if it's the outermost prefab
+            // instance — otherwise overrides living directly on Level (scene
+            // Position, Game Map script, etc.) would not appear in the report.
+            if (PrefabUtility.IsPartOfPrefabInstance(root))
             {
-                // Find all PrefabInstance roots recursively
-                var instanceRoots = new List<(GameObject go, string hierarchyPath)>();
-                CollectPrefabInstanceRoots(root.transform, "", instanceRoots);
+                var outerRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(root);
+                if (outerRoot == root)
+                    instanceRoots.Insert(0, (root, root.name));
+            }
 
-                report.InstancesAnalyzed = instanceRoots.Count;
+            report.InstancesAnalyzed = instanceRoots.Count;
+            report.Chain = BuildChain(root);
 
-                // Also include the root itself if it's a prefab instance
-                if (PrefabUtility.IsPartOfPrefabInstance(root))
+            var goReports = new Dictionary<string, GameObjectReport>();
+            int total = instanceRoots.Count;
+
+            for (int idx = 0; idx < total; idx++)
+            {
+                var (instanceGO, hierPath) = instanceRoots[idx];
+
+                // Build chain for this specific instance.
+                var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(instanceGO);
+                if (instanceRoot == null) instanceRoot = instanceGO;
+
+                var chain = BuildChain(instanceRoot);
+                if (chain.Count >= 2)
                 {
-                    var outerRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(root);
-                    if (outerRoot == root)
-                        instanceRoots.Insert(0, (root, root.name));
-                }
-
-                // Build a combined chain from the root (for display)
-                report.Chain = BuildChain(root);
-
-                var goReports = new Dictionary<string, GameObjectReport>();
-
-                foreach (var (instanceGO, hierPath) in instanceRoots)
-                {
-                    // Build chain for this specific instance
-                    var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(instanceGO);
-                    if (instanceRoot == null) instanceRoot = instanceGO;
-
-                    var chain = BuildChain(instanceRoot);
-                    if (chain.Count < 2) continue;
-
-                    // Collect overrides for this instance
                     var overrideMap = CollectOverrides(chain);
 
-                    // Classify and merge into report — prefix paths with hierarchy location
+                    // Scalar properties — classify and merge with hier-prefixed paths.
                     foreach (var kvp in overrideMap)
                     {
                         if (ComparerRouter.IsQuaternionComponent(kvp.Key.PropertyPath))
                             continue;
 
-                        // Prefix the GO path with hierarchy path so we know WHERE in the tree
                         var prefixedKey = new PropertyKey
                         {
                             ComponentType = kvp.Key.ComponentType,
@@ -337,7 +361,7 @@ namespace SashaRX.PrefabDoctor
                             AddConflictToReport(goReports, conflict, report);
                     }
 
-                    // Quaternion groups
+                    // Quaternion groups.
                     var qGroups = GroupQuaternionOverrides(overrideMap);
                     foreach (var qg in qGroups)
                     {
@@ -363,21 +387,32 @@ namespace SashaRX.PrefabDoctor
                     }
                 }
 
-                report.GameObjects = goReports.Values
-                    .OrderByDescending(g => g.PingPongCount)
-                    .ThenByDescending(g => g.MultiOverrideCount)
-                    .ThenByDescending(g => g.InsignificantCount)
-                    .ToList();
-
-                report.IsComplete = true;
-            }
-            finally
-            {
-                EndRun();
-                report.AnalysisTimeMs = sw.ElapsedMilliseconds;
+                // Yield after each instance — the batch granularity is already
+                // "one prefab instance worth of work", which on typical content
+                // is a few ms and keeps the editor very responsive.
+                yield return total > 0 ? (float)(idx + 1) / total : 1f;
             }
 
-            return report;
+            report.GameObjects = goReports.Values
+                .OrderByDescending(g => g.PingPongCount)
+                .ThenByDescending(g => g.MultiOverrideCount)
+                .ThenByDescending(g => g.InsignificantCount)
+                .ToList();
+
+            report.IsComplete = true;
+            EndRun();
+            report.AnalysisTimeMs = sw.ElapsedMilliseconds;
+            yield return 1f;
+        }
+
+        /// <summary>
+        /// Release per-run state (SerializedObject cache, ignore snapshot,
+        /// GO/component caches) without completing an analysis. Call this
+        /// from the pump loop if the user cancels an incremental run.
+        /// </summary>
+        public void AbortRun()
+        {
+            EndRun();
         }
 
         /// <summary>

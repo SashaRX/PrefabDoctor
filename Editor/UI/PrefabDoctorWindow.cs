@@ -22,11 +22,18 @@ namespace SashaRX.PrefabDoctor
         private AnalysisReport _report;
         private OverrideAnalyzer _analyzer = new();
 
-        // Incremental analysis
+        // Incremental analysis (instance mode)
         private IEnumerator<float> _incrementalJob;
         private AnalysisReport _pendingReport;
         private float _progress;
         private bool _useIncremental = true;
+
+        // Incremental hierarchy analysis — separate job so it does not
+        // collide with instance-mode incremental state. Pumped from
+        // PumpHierarchyJob via EditorApplication.update.
+        private IEnumerator<float> _hierarchyJob;
+        private AnalysisReport _pendingHierarchyReport;
+        private int _hierarchyInstancesTotal;
 
         // Project scan (separate panel)
         private ProjectScanPanel _scanPanel = new();
@@ -600,45 +607,101 @@ namespace SashaRX.PrefabDoctor
         {
             if (_target == null) return;
 
+            // Stop any running jobs — hierarchy run supersedes both the
+            // instance-mode incremental job and any in-flight hierarchy job.
             _incrementalJob = null;
             _pendingReport = null;
+            if (_hierarchyJob != null)
+            {
+                _analyzer.AbortRun();
+                _hierarchyJob = null;
+                _pendingHierarchyReport = null;
+                EditorApplication.update -= PumpHierarchyJob;
+                EditorUtility.ClearProgressBar();
+            }
 
             _analyzer.IncludeDefaultOverrides = _showDefaults;
             _analyzer.IncludeSceneOverrides = true; // hierarchy mode always includes scene
             _analyzer.IncludeInternalProperties = _showInternalProps;
 
-            int nestedInstanceCount = CountNestedPrefabInstances(_target.transform);
-            bool showProgress = nestedInstanceCount > 50;
-            if (showProgress)
+            // Rough total for the progress bar — the analyzer itself will
+            // add the root to its own list separately, so this is a lower
+            // bound that stays useful even if it is off by one.
+            _hierarchyInstancesTotal = CountNestedPrefabInstances(_target.transform);
+            _pendingHierarchyReport = new AnalysisReport();
+            _hierarchyJob = _analyzer.AnalyzeHierarchyIncremental(
+                _target, _pendingHierarchyReport);
+            _progress = 0f;
+
+            EditorUtility.DisplayProgressBar(
+                "Prefab Doctor",
+                $"Analyzing hierarchy ({_hierarchyInstancesTotal} instances)...",
+                0f);
+
+            EditorApplication.update += PumpHierarchyJob;
+            Repaint();
+        }
+
+        private void PumpHierarchyJob()
+        {
+            if (_hierarchyJob == null)
             {
-                EditorUtility.DisplayProgressBar(
+                EditorApplication.update -= PumpHierarchyJob;
+                EditorUtility.ClearProgressBar();
+                return;
+            }
+
+            // DisplayCancelableProgressBar is cheap enough to call every
+            // pump tick and is the only way to surface the Cancel button.
+            if (EditorUtility.DisplayCancelableProgressBar(
                     "Prefab Doctor",
-                    $"Analyzing {nestedInstanceCount} instances...",
-                    0f);
-            }
-
-            try
+                    $"Analyzing hierarchy {_progress:P0} ({_hierarchyInstancesTotal} instances)",
+                    _progress))
             {
-                _report = _analyzer.AnalyzeHierarchy(_target);
+                _analyzer.AbortRun();
+                _hierarchyJob = null;
+                _pendingHierarchyReport = null;
+                EditorApplication.update -= PumpHierarchyJob;
+                EditorUtility.ClearProgressBar();
+                Debug.Log("[Prefab Doctor] Hierarchy analysis cancelled by user");
+                Repaint();
+                return;
             }
-            finally
+
+            // Advance the enumerator for up to ~16ms — one editor frame
+            // worth of work — then yield back to the editor so the UI
+            // stays responsive and the Cancel button stays clickable.
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 16)
             {
-                if (showProgress) EditorUtility.ClearProgressBar();
+                if (!_hierarchyJob.MoveNext())
+                {
+                    _report = _pendingHierarchyReport;
+                    _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
+                    _selectedConflicts.Clear();
+
+                    // Hierarchy mode treats insignificant/noise as primary
+                    // output — the default ConflictsOnly filter hides most
+                    // of the signal here.
+                    _filterMode = FilterMode.AllOverrides;
+
+                    _hierarchyJob = null;
+                    _pendingHierarchyReport = null;
+                    EditorApplication.update -= PumpHierarchyJob;
+                    EditorUtility.ClearProgressBar();
+
+                    Debug.Log(
+                        $"[Prefab Doctor] Hierarchy: {_report.InstancesAnalyzed} instances, "
+                        + $"{_report.TotalPingPong} ping-pong, "
+                        + $"{_report.TotalMultiOverride} multi, "
+                        + $"{_report.TotalInsignificant} insignificant, "
+                        + $"{_report.AnalysisTimeMs:F0}ms");
+
+                    Repaint();
+                    return;
+                }
+                _progress = _hierarchyJob.Current;
             }
-
-            _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
-            _selectedConflicts.Clear();
-
-            // Hierarchy mode treats insignificant/noise as primary output — the
-            // default ConflictsOnly filter hides most of the signal here.
-            _filterMode = FilterMode.AllOverrides;
-
-            Debug.Log(
-                $"[Prefab Doctor] Hierarchy: {_report.InstancesAnalyzed} instances, "
-                + $"{_report.TotalMultiOverride} multi, "
-                + $"{_report.TotalInsignificant} insignificant, "
-                + $"{_report.AnalysisTimeMs:F0}ms");
-
             Repaint();
         }
 
@@ -699,8 +762,22 @@ namespace SashaRX.PrefabDoctor
         private void OnDisable()
         {
             EditorApplication.update -= PumpIncrementalJob;
+            EditorApplication.update -= PumpHierarchyJob;
             EditorApplication.update -= PumpScanJob;
             _incrementalJob = null;
+
+            // Abort any in-flight hierarchy job so its per-run caches get
+            // released. Also make sure the modal progress bar is dismissed —
+            // otherwise closing the window mid-run could leave Unity with
+            // a stuck progress overlay.
+            if (_hierarchyJob != null)
+            {
+                _analyzer?.AbortRun();
+                _hierarchyJob = null;
+                _pendingHierarchyReport = null;
+                EditorUtility.ClearProgressBar();
+            }
+
             // Release any SerializedObject handles the analyzer kept across
             // an incremental run that was abandoned by closing the window.
             _analyzer?.ClearSerializedObjectCache();
