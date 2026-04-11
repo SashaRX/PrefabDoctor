@@ -581,6 +581,10 @@ namespace SashaRX.PrefabDoctor
             _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
             _selectedConflicts.Clear();
 
+            // Hierarchy mode treats insignificant/noise as primary output — the
+            // default ConflictsOnly filter hides most of the signal here.
+            _filterMode = FilterMode.AllOverrides;
+
             Debug.Log(
                 $"[Prefab Doctor] Hierarchy: {_report.InstancesAnalyzed} instances, "
                 + $"{_report.TotalMultiOverride} multi, "
