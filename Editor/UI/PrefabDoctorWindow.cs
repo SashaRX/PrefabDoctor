@@ -4,7 +4,6 @@ using System.Diagnostics;
 using Debug = UnityEngine.Debug;
 using System.Linq;
 using UnityEditor;
-using UnityEditor.IMGUI.Controls;
 using UnityEditor.UIElements;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -19,7 +18,6 @@ namespace SashaRX.PrefabDoctor
 
         // ── State ──────────────────────────────────────────────────
         private int _activeTab; // 0 = Instance Analysis, 1 = Project Scan
-        private static readonly string[] s_TabNames = { "Instance Analysis", "Project Scan" };
 
         private GameObject _target;
         private AnalysisReport _report;
@@ -48,7 +46,6 @@ namespace SashaRX.PrefabDoctor
         private FilterMode _filterMode = FilterMode.ConflictsOnly;
 
         // UI state
-        private Vector2 _leftScroll;
         private int _selectedGoIndex = -1;
 
         // Selection for batch ops. Stable across left-panel GameObject
@@ -71,30 +68,66 @@ namespace SashaRX.PrefabDoctor
         private Dictionary<GameObjectReport, int> _goReportIndexMap;
         private AnalysisReport _goReportIndexMapReport;
 
-        // Cached category counts — CountByCategory iterates every conflict
-        // in every GameObjectReport, which on a hierarchy run with 300k+
-        // objects turns into millions of operations per Repaint if invoked
-        // from DrawStatusBar unconditionally. Invalidated on report change.
+        // Cached category counts — a hierarchy run with 300k+ objects
+        // turns into millions of operations per RefreshStatusBar if
+        // recomputed on every repaint. Invalidated on report change.
         private Dictionary<OverrideCategory, int> _categoryCountsCache;
         private AnalysisReport _categoryCountsCacheReport;
 
-        // Hard render cap for the (still-IMGUI) left panel in Phase 1.
-        // Phase 2 replaces DrawGameObjectList with a virtualised ListView
-        // and this cap goes away.
-        private const int k_MaxVisibleGOs = 500;
+        // ── UI Toolkit elements (Phase 2 — full port) ──────────────
+        // Tab bar
+        private Toolbar _tabToolbar;
+        private ToolbarToggle _instanceTabToggle;
+        private ToolbarToggle _scanTabToggle;
+        private bool _muteTabToggleSync;
 
-        // ── UI Toolkit elements (Phase 1 hybrid) ───────────────────
-        private VisualElement _imguiShellTop;       // tab bar + toolbar + status bar host
+        // Top toolbar (instance tab)
+        private Toolbar _topToolbar;
+        private ObjectField _targetField;
+        private ToolbarMenu _filterMenu;
+        private ToolbarToggle _defaultsToggle;
+        private ToolbarToggle _sceneToggle;
+        private ToolbarToggle _internalToggle;
+        private ToolbarButton _cleanOrphansButton;
+        private ToolbarButton _cleanInsignificantButton;
+        private ToolbarButton _copyReportButton;
+
+        // Status bar
+        private VisualElement _statusBar;
+        private Label _statusChainLabel;
+        private Label _statusPpLabel;
+        private Label _statusMultiLabel;
+        private Label _statusOrphanLabel;
+        private Label _statusInsigLabel;
+        private Label _statusLightmapLabel;
+        private Label _statusNetLabel;
+        private Label _statusFlagsLabel;
+        private Label _statusOtherLabel;
+        private Label _statusElapsedLabel;
+
+        // Tab bodies
         private VisualElement _instanceTab;
         private VisualElement _scanTab;
         private TwoPaneSplitView _instanceSplit;
-        private IMGUIContainer _leftPanelImgui;
+
+        // Left panel
+        private VisualElement _leftPanel;
+        private ListView _gameObjectListView;
+        private bool _muteGoListSync;
+
+        // Right panel
         private VisualElement _rightPanel;
-        private IMGUIContainer _rightPanelHeaderImgui;
+        private VisualElement _conflictHeader;
+        private Label _conflictHeaderLabel;
+        private Button _conflictHeaderPingButton;
         private VisualElement _batchBar;
         private Label _batchCountLabel;
         private MultiColumnListView _conflictListView;
-        private IMGUIContainer _emptyStateImgui;
+
+        // Empty state
+        private VisualElement _emptyState;
+        private Label _emptyStateLabel;
+        private ProgressBar _emptyStateProgress;
 
         // Backing list for MultiColumnListView. Rebuilt on GO selection or
         // filter change; handed to MCLV as itemsSource.
@@ -166,44 +199,50 @@ namespace SashaRX.PrefabDoctor
 
         // ── Main Layout ────────────────────────────────────────────
         //
-        // Phase 1 hybrid: the window's root is a UI Toolkit VisualElement
-        // tree, but everything except the right-panel conflict list is
-        // still drawn via IMGUIContainer — we have not rewritten the
-        // toolbar, status bar, left panel, or project scan panel yet. The
-        // big win is that the right panel's conflict table is now a real
-        // MultiColumnListView with full row virtualisation, which both
-        // removes the k_MaxVisibleConflicts row cap and lets the batch
-        // selection carry a stable ConflictHandle across GameObject
-        // switches and filter changes. Phase 2 will port the rest.
+        // Phase 2: the Instance Analysis tab is now 100% UI Toolkit
+        // (toolbar, status bar, left panel, right panel, empty state,
+        // tab bar). The Project Scan tab is still drawn via a single
+        // IMGUIContainer wrapping ProjectScanPanel.OnGUI — Phase 3
+        // ports that too. The left-panel GameObject list is now a
+        // virtualised ListView, dropping the old k_MaxVisibleGOs cap,
+        // and the batch bar gained a "Select All Matching" action
+        // that spans the full report (not just the current GO).
 
         private void CreateGUI()
         {
             var root = rootVisualElement;
             root.style.flexDirection = FlexDirection.Column;
 
-            // Tab bar + toolbar + status bar live in a single IMGUIContainer
-            // that renders the pre-existing DrawToolbar / DrawStatusBar
-            // paths. The tab bar itself is drawn here too so tab switching
-            // stays entirely IMGUI-controlled until Phase 2.
-            _imguiShellTop = new IMGUIContainer(DrawShellTopImgui);
-            _imguiShellTop.style.flexShrink = 0;
-            root.Add(_imguiShellTop);
+            // Tab bar
+            _tabToolbar = new Toolbar();
+            _instanceTabToggle = new ToolbarToggle { text = "Instance Analysis" };
+            _instanceTabToggle.style.flexGrow = 1;
+            _instanceTabToggle.style.unityTextAlign = TextAnchor.MiddleCenter;
+            _instanceTabToggle.RegisterValueChangedCallback(evt => OnTabToggle(0, evt.newValue));
+            _tabToolbar.Add(_instanceTabToggle);
 
-            // Instance Analysis tab body.
+            _scanTabToggle = new ToolbarToggle { text = "Project Scan" };
+            _scanTabToggle.style.flexGrow = 1;
+            _scanTabToggle.style.unityTextAlign = TextAnchor.MiddleCenter;
+            _scanTabToggle.RegisterValueChangedCallback(evt => OnTabToggle(1, evt.newValue));
+            _tabToolbar.Add(_scanTabToggle);
+            root.Add(_tabToolbar);
+
+            // Instance Analysis tab body
             _instanceTab = new VisualElement();
             _instanceTab.style.flexGrow = 1;
             _instanceTab.style.flexDirection = FlexDirection.Column;
             root.Add(_instanceTab);
 
-            // Empty state host: shown when the report is null or has no
-            // GameObjectReports. Same DrawEmptyState body as before.
-            _emptyStateImgui = new IMGUIContainer(DrawEmptyState);
-            _emptyStateImgui.style.flexGrow = 1;
-            _instanceTab.Add(_emptyStateImgui);
+            _topToolbar = BuildTopToolbar();
+            _instanceTab.Add(_topToolbar);
 
-            // Split view is mounted on demand so TwoPaneSplitView always
-            // has exactly its two required children and the empty state
-            // path does not need to fight it for layout.
+            _statusBar = BuildStatusBar();
+            _instanceTab.Add(_statusBar);
+
+            _emptyState = BuildEmptyState();
+            _instanceTab.Add(_emptyState);
+
             _instanceSplit = new TwoPaneSplitView(
                 fixedPaneIndex: 0,
                 fixedPaneStartDimension: 260f,
@@ -215,14 +254,13 @@ namespace SashaRX.PrefabDoctor
             _instanceSplit.style.display = DisplayStyle.None;
             _instanceTab.Add(_instanceSplit);
 
-            _leftPanelImgui = new IMGUIContainer(DrawGameObjectListScrolled);
-            _leftPanelImgui.style.flexGrow = 1;
-            _instanceSplit.Add(_leftPanelImgui);
+            _leftPanel = BuildLeftPanel();
+            _instanceSplit.Add(_leftPanel);
 
             _rightPanel = BuildRightPanel();
             _instanceSplit.Add(_rightPanel);
 
-            // Project Scan tab body — still 100% IMGUI.
+            // Project Scan tab body — still IMGUI for Phase 2
             _scanTab = new VisualElement();
             _scanTab.style.flexGrow = 1;
             _scanTab.style.display = DisplayStyle.None;
@@ -231,36 +269,43 @@ namespace SashaRX.PrefabDoctor
             _scanTab.Add(scanImgui);
             root.Add(_scanTab);
 
+            // Initial state sync
+            _instanceTabToggle.SetValueWithoutNotify(_activeTab == 0);
+            _scanTabToggle.SetValueWithoutNotify(_activeTab == 1);
             RefreshTabVisibility();
+            RefreshTopToolbar();
+            RefreshStatusBar();
+            RefreshEmptyState();
+            RefreshLeftPanel();
             RebuildConflictList();
             UpdateBatchBar();
         }
 
-        /// <summary>
-        /// IMGUI shell that draws the tab bar + (on the instance tab) the
-        /// toolbar and status bar. Auto-height because it adapts to which
-        /// sub-sections draw based on current state.
-        /// </summary>
-        private void DrawShellTopImgui()
+        private void OnTabToggle(int tab, bool value)
         {
-            // Tab bar
-            int newTab = GUILayout.Toolbar(_activeTab, s_TabNames, GUILayout.Height(22));
-            if (newTab != _activeTab)
+            if (_muteTabToggleSync) return;
+            if (!value)
             {
-                _activeTab = newTab;
-                RefreshTabVisibility();
+                // Don't allow deselecting the active tab — force it back on.
+                _muteTabToggleSync = true;
+                try
+                {
+                    if (tab == 0) _instanceTabToggle.SetValueWithoutNotify(_activeTab == 0);
+                    else _scanTabToggle.SetValueWithoutNotify(_activeTab == 1);
+                }
+                finally { _muteTabToggleSync = false; }
+                return;
             }
 
-            if (_activeTab != 0) return;
-
-            DrawToolbar();
-            DrawStatusBar();
-
-            // Layout visibility for the body: either the split view (with
-            // the conflict list) or the empty state, but never both.
-            bool haveReport = _report != null && _report.GameObjects.Count > 0;
-            SetDisplay(_instanceSplit, haveReport);
-            SetDisplay(_emptyStateImgui, !haveReport);
+            _activeTab = tab;
+            _muteTabToggleSync = true;
+            try
+            {
+                _instanceTabToggle.SetValueWithoutNotify(tab == 0);
+                _scanTabToggle.SetValueWithoutNotify(tab == 1);
+            }
+            finally { _muteTabToggleSync = false; }
+            RefreshTabVisibility();
         }
 
         private void RefreshTabVisibility()
@@ -276,189 +321,344 @@ namespace SashaRX.PrefabDoctor
             element.style.display = visible ? DisplayStyle.Flex : DisplayStyle.None;
         }
 
-        /// <summary>
-        /// IMGUI left-panel wrapper that preserves the legacy scroll view.
-        /// Phase 2 replaces this with a ListView.
-        /// </summary>
-        private void DrawGameObjectListScrolled()
+        private void RefreshEmptyState()
         {
-            _leftScroll = EditorGUILayout.BeginScrollView(_leftScroll);
-            DrawGameObjectList();
-            EditorGUILayout.EndScrollView();
-        }
+            bool haveReport = _report != null && _report.GameObjects.Count > 0;
+            SetDisplay(_instanceSplit, haveReport);
+            SetDisplay(_emptyState, !haveReport);
 
-        // ── Toolbar ────────────────────────────────────────────────
+            if (_emptyStateLabel == null) return;
 
-        private void DrawToolbar()
-        {
-            EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
-
-            // Target field
-            var newTarget = (GameObject)EditorGUILayout.ObjectField(
-                _target, typeof(GameObject), true, GUILayout.Width(200));
-            if (newTarget != _target)
+            if (_incrementalJob != null || _hierarchyJob != null)
             {
-                _target = newTarget;
-                _report = null;
+                _emptyStateLabel.text = "Analyzing…";
+                SetDisplay(_emptyStateProgress, true);
+                _emptyStateProgress.value = _progress * 100f;
+                _emptyStateProgress.title = $"{_progress * 100f:F0}%";
             }
-
-            // Use selection
-            if (GUILayout.Button("← Selection", EditorStyles.toolbarButton, GUILayout.Width(80)))
+            else if (_target == null)
             {
-                if (Selection.activeGameObject != null)
-                {
-                    _target = Selection.activeGameObject;
-                    _report = null;
-                }
+                _emptyStateLabel.text =
+                    "Select a prefab instance and click Analyze,\n"
+                    + "or drag it into the target field above.";
+                SetDisplay(_emptyStateProgress, false);
             }
-
-            GUILayout.Space(8);
-
-            // Analyze button
-            GUI.backgroundColor = _target != null ? new Color(0.4f, 0.8f, 0.4f) : Color.gray;
-            if (GUILayout.Button("Analyze", EditorStyles.toolbarButton, GUILayout.Width(60)))
+            else if (_report != null && _report.GameObjects.Count == 0)
             {
-                RunAnalysis();
-            }
-            // Hierarchy mode — the important one
-            GUI.backgroundColor = _target != null ? new Color(0.3f, 0.6f, 1f) : Color.gray;
-            if (GUILayout.Button("▼ Hierarchy", EditorStyles.toolbarButton, GUILayout.Width(85)))
-            {
-                RunHierarchyAnalysis();
-            }
-            GUI.backgroundColor = Color.white;
-
-            GUILayout.Space(8);
-
-            // Filter mode — rebuild conflict list on change so the
-            // MultiColumnListView picks up the new set. Selection
-            // (by stable ConflictHandle) survives the rebuild.
-            var newFilter = (FilterMode)EditorGUILayout.EnumPopup(_filterMode,
-                EditorStyles.toolbarDropDown, GUILayout.Width(130));
-            if (newFilter != _filterMode)
-            {
-                _filterMode = newFilter;
-                RebuildConflictList();
-            }
-
-            GUILayout.FlexibleSpace();
-
-            // Toggles
-            _showDefaults = GUILayout.Toggle(_showDefaults, "Defaults",
-                EditorStyles.toolbarButton, GUILayout.Width(60));
-            _showSceneOverrides = GUILayout.Toggle(_showSceneOverrides, "Scene",
-                EditorStyles.toolbarButton, GUILayout.Width(50));
-            _showInternalProps = GUILayout.Toggle(_showInternalProps, "Internal",
-                EditorStyles.toolbarButton, GUILayout.Width(55));
-
-            GUILayout.Space(4);
-
-            // Batch actions
-            if (_report != null)
-            {
-                // In hierarchy mode, Clean Orphans operates on EVERY prefab
-                // instance root in the current report (bulk), not just
-                // _target. A single scene can easily have ~1000 orphan mods
-                // per instance, so the scoped variant is basically useless
-                // for large levels. Label and confirmation dialog change
-                // so the user knows what they're about to do.
-                bool hierarchy = _report.IsHierarchyMode
-                    && _report.HierarchyInstanceRoots != null
-                    && _report.HierarchyInstanceRoots.Count > 0;
-
-                string cleanLabel = hierarchy
-                    ? $"Clean Orphans ({_report.HierarchyInstanceRoots.Count})"
-                    : "Clean Orphans";
-                float cleanWidth = hierarchy ? 140f : 90f;
-
-                if (GUILayout.Button(cleanLabel, EditorStyles.toolbarButton,
-                        GUILayout.Width(cleanWidth)))
-                {
-                    if (hierarchy)
-                        DoCleanOrphansHierarchy();
-                    else
-                    {
-                        int removed = OverrideActions.CleanOrphans(_target);
-                        Debug.Log($"[Prefab Doctor] Cleaned {removed} orphaned overrides");
-                        RunAnalysis();
-                    }
-                }
-
-                if (GUILayout.Button("Clean Insignificant", EditorStyles.toolbarButton, GUILayout.Width(110)))
-                {
-                    int removed = OverrideActions.CleanInsignificant(_target, _report.Chain);
-                    Debug.Log($"[Prefab Doctor] Cleaned {removed} insignificant overrides");
-                    RunAnalysis();
-                }
-
-                if (GUILayout.Button("Copy Report", EditorStyles.toolbarButton, GUILayout.Width(85)))
-                {
-                    string md = OverrideReportFormatter.ToMarkdown(_report);
-                    EditorGUIUtility.systemCopyBuffer = md;
-                    Debug.Log($"[Prefab Doctor] Copied report ({md.Length} chars) to clipboard");
-                }
-            }
-
-            EditorGUILayout.EndHorizontal();
-        }
-
-        // ── Status Bar ─────────────────────────────────────────────
-
-        private void DrawStatusBar()
-        {
-            if (_report == null) return;
-
-            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-
-            if (_report.IsHierarchyMode)
-            {
-                GUILayout.Label($"HIERARCHY: {_report.InstancesAnalyzed} instances, " +
-                                $"{_report.GameObjects.Count} objects with overrides",
-                    EditorStyles.miniLabel);
+                _emptyStateLabel.text = _report.IsComplete
+                    ? "No conflicts found. Prefab is clean."
+                    : "No conflicts found.\nAnalysis incomplete.";
+                SetDisplay(_emptyStateProgress, false);
             }
             else
             {
-                var chainNames = string.Join(" → ",
-                    _report.Chain.Select(l => l.IsSceneInstance ? "[Scene]" :
-                        System.IO.Path.GetFileNameWithoutExtension(l.AssetPath)));
-                GUILayout.Label($"Chain: {chainNames}", EditorStyles.miniLabel);
+                _emptyStateLabel.text = "Click Analyze to begin.";
+                SetDisplay(_emptyStateProgress, false);
             }
-
-            GUILayout.FlexibleSpace();
-
-            DrawBadge($"PP:{_report.TotalPingPong}", Color.red, _report.TotalPingPong > 0);
-            DrawBadge($"Multi:{_report.TotalMultiOverride}", new Color(1f, 0.7f, 0f),
-                _report.TotalMultiOverride > 0);
-            DrawBadge($"Orphan:{_report.TotalOrphan}", new Color(0.6f, 0.6f, 0.6f),
-                _report.TotalOrphan > 0);
-            DrawBadge($"Insig:{_report.TotalInsignificant}", new Color(0.5f, 0.8f, 1f),
-                _report.TotalInsignificant > 0);
-
-            var catCounts = GetCategoryCounts();
-            GUILayout.Label("│", EditorStyles.miniLabel);
-            DrawBadge($"Lightmap:{catCounts[OverrideCategory.Lightmap]}",
-                new Color(1f, 0.9f, 0.3f), catCounts[OverrideCategory.Lightmap] > 0);
-            DrawBadge($"Net:{catCounts[OverrideCategory.NetworkNoise]}",
-                new Color(0.4f, 0.9f, 0.7f), catCounts[OverrideCategory.NetworkNoise] > 0);
-            DrawBadge($"Flags:{catCounts[OverrideCategory.StaticFlags]}",
-                new Color(0.8f, 0.7f, 1f), catCounts[OverrideCategory.StaticFlags] > 0);
-            int otherCount = catCounts[OverrideCategory.General]
-                + catCounts[OverrideCategory.Transform]
-                + catCounts[OverrideCategory.Name]
-                + catCounts[OverrideCategory.Material];
-            DrawBadge($"Other:{otherCount}", new Color(0.7f, 0.7f, 0.7f), otherCount > 0);
-
-            GUILayout.Label($"  {_report.AnalysisTimeMs:F0}ms", EditorStyles.miniLabel);
-
-            EditorGUILayout.EndHorizontal();
         }
 
-        private void DrawBadge(string text, Color color, bool active)
+        // ── Top Toolbar (UI Toolkit) ───────────────────────────────
+
+        private Toolbar BuildTopToolbar()
         {
-            var prevColor = GUI.contentColor;
-            GUI.contentColor = active ? color : new Color(0.5f, 0.5f, 0.5f);
-            GUILayout.Label(text, EditorStyles.miniBoldLabel, GUILayout.ExpandWidth(false));
-            GUI.contentColor = prevColor;
+            var toolbar = new Toolbar();
+            toolbar.style.flexShrink = 0;
+
+            _targetField = new ObjectField
+            {
+                objectType = typeof(GameObject),
+                allowSceneObjects = true
+            };
+            _targetField.style.width = 220;
+            _targetField.style.marginLeft = 2;
+            _targetField.style.marginRight = 2;
+            _targetField.SetValueWithoutNotify(_target);
+            _targetField.RegisterValueChangedCallback(evt =>
+            {
+                _target = evt.newValue as GameObject;
+                _report = null;
+                _selectedConflicts.Clear();
+                RefreshAfterReportChange();
+            });
+            toolbar.Add(_targetField);
+
+            var selectionButton = new ToolbarButton(() =>
+            {
+                if (Selection.activeGameObject == null) return;
+                _target = Selection.activeGameObject;
+                _targetField.SetValueWithoutNotify(_target);
+                _report = null;
+                _selectedConflicts.Clear();
+                RefreshAfterReportChange();
+            })
+            { text = "← Selection" };
+            toolbar.Add(selectionButton);
+
+            toolbar.Add(new ToolbarSpacer());
+
+            var analyzeButton = new ToolbarButton(RunAnalysis) { text = "Analyze" };
+            analyzeButton.style.color = new Color(0.5f, 0.9f, 0.5f);
+            toolbar.Add(analyzeButton);
+
+            var hierarchyButton = new ToolbarButton(RunHierarchyAnalysis)
+            {
+                text = "▼ Hierarchy"
+            };
+            hierarchyButton.style.color = new Color(0.45f, 0.7f, 1f);
+            toolbar.Add(hierarchyButton);
+
+            toolbar.Add(new ToolbarSpacer());
+
+            // Filter menu — rebuild conflict list on change so the
+            // MultiColumnListView picks up the new set. Selection
+            // (by stable ConflictHandle) survives the rebuild.
+            _filterMenu = new ToolbarMenu { text = FilterModeLabel(_filterMode) };
+            _filterMenu.style.minWidth = 140;
+            foreach (FilterMode fm in Enum.GetValues(typeof(FilterMode)))
+            {
+                var captured = fm;
+                _filterMenu.menu.AppendAction(FilterModeLabel(captured),
+                    _ =>
+                    {
+                        if (_filterMode == captured) return;
+                        _filterMode = captured;
+                        _filterMenu.text = FilterModeLabel(captured);
+                        RefreshLeftPanel();
+                        RebuildConflictList();
+                    },
+                    _ => _filterMode == captured
+                        ? DropdownMenuAction.Status.Checked
+                        : DropdownMenuAction.Status.Normal);
+            }
+            toolbar.Add(_filterMenu);
+
+            var flexSpacer = new ToolbarSpacer { style = { flexGrow = 1 } };
+            toolbar.Add(flexSpacer);
+
+            _defaultsToggle = new ToolbarToggle { text = "Defaults", value = _showDefaults };
+            _defaultsToggle.tooltip = "Include default overrides (m_Name, m_IsActive, parent).";
+            _defaultsToggle.RegisterValueChangedCallback(evt => _showDefaults = evt.newValue);
+            toolbar.Add(_defaultsToggle);
+
+            _sceneToggle = new ToolbarToggle { text = "Scene", value = _showSceneOverrides };
+            _sceneToggle.tooltip = "Include scene-level (instance) overrides.";
+            _sceneToggle.RegisterValueChangedCallback(evt => _showSceneOverrides = evt.newValue);
+            toolbar.Add(_sceneToggle);
+
+            _internalToggle = new ToolbarToggle
+            { text = "Internal", value = _showInternalProps };
+            _internalToggle.tooltip = "Include internal / backing-field properties.";
+            _internalToggle.RegisterValueChangedCallback(evt => _showInternalProps = evt.newValue);
+            toolbar.Add(_internalToggle);
+
+            _cleanOrphansButton = new ToolbarButton(OnCleanOrphansClicked)
+            { text = "Clean Orphans" };
+            toolbar.Add(_cleanOrphansButton);
+
+            _cleanInsignificantButton = new ToolbarButton(() =>
+            {
+                if (_report == null) return;
+                int removed = OverrideActions.CleanInsignificant(_target, _report.Chain);
+                Debug.Log($"[Prefab Doctor] Cleaned {removed} insignificant overrides");
+                RunAnalysis();
+            })
+            { text = "Clean Insignificant" };
+            toolbar.Add(_cleanInsignificantButton);
+
+            _copyReportButton = new ToolbarButton(() =>
+            {
+                if (_report == null) return;
+                string md = OverrideReportFormatter.ToMarkdown(_report);
+                EditorGUIUtility.systemCopyBuffer = md;
+                Debug.Log($"[Prefab Doctor] Copied report ({md.Length} chars) to clipboard");
+            })
+            { text = "Copy Report" };
+            toolbar.Add(_copyReportButton);
+
+            return toolbar;
+        }
+
+        private static string FilterModeLabel(FilterMode mode) => mode switch
+        {
+            FilterMode.ConflictsOnly => "Conflicts Only",
+            FilterMode.AllOverrides => "All Overrides",
+            FilterMode.PingPongOnly => "Ping-Pong Only",
+            FilterMode.OrphansOnly => "Orphans Only",
+            FilterMode.InsignificantOnly => "Insignificant Only",
+            FilterMode.LightmapOnly => "Lightmap Only",
+            FilterMode.NetworkNoiseOnly => "Network Noise Only",
+            FilterMode.GraphicsOnly => "Graphics Only",
+            FilterMode.TransformOnly => "Transform Only",
+            FilterMode.GarbageOnly => "Garbage Only",
+            _ => mode.ToString()
+        };
+
+        private void OnCleanOrphansClicked()
+        {
+            if (_report == null) return;
+            bool hierarchy = _report.IsHierarchyMode
+                && _report.HierarchyInstanceRoots != null
+                && _report.HierarchyInstanceRoots.Count > 0;
+            if (hierarchy)
+            {
+                DoCleanOrphansHierarchy();
+            }
+            else
+            {
+                int removed = OverrideActions.CleanOrphans(_target);
+                Debug.Log($"[Prefab Doctor] Cleaned {removed} orphaned overrides");
+                RunAnalysis();
+            }
+        }
+
+        private void RefreshTopToolbar()
+        {
+            if (_topToolbar == null) return;
+            bool haveReport = _report != null;
+            bool hierarchy = haveReport && _report.IsHierarchyMode
+                && _report.HierarchyInstanceRoots != null
+                && _report.HierarchyInstanceRoots.Count > 0;
+
+            _cleanOrphansButton.SetEnabled(haveReport);
+            _cleanOrphansButton.text = hierarchy
+                ? $"Clean Orphans ({_report.HierarchyInstanceRoots.Count})"
+                : "Clean Orphans";
+            _cleanInsignificantButton.SetEnabled(haveReport);
+            _copyReportButton.SetEnabled(haveReport);
+
+            if (_targetField != null && _targetField.value != (UnityEngine.Object)_target)
+                _targetField.SetValueWithoutNotify(_target);
+        }
+
+        // ── Status Bar (UI Toolkit) ────────────────────────────────
+
+        private VisualElement BuildStatusBar()
+        {
+            var bar = new VisualElement();
+            bar.style.flexDirection = FlexDirection.Row;
+            bar.style.alignItems = Align.Center;
+            bar.style.flexShrink = 0;
+            bar.style.paddingLeft = 6;
+            bar.style.paddingRight = 6;
+            bar.style.paddingTop = 2;
+            bar.style.paddingBottom = 2;
+            bar.style.borderBottomWidth = 1;
+            bar.style.borderBottomColor = new Color(0f, 0f, 0f, 0.35f);
+            bar.style.backgroundColor = new Color(0.16f, 0.16f, 0.16f, 0.45f);
+
+            _statusChainLabel = new Label("(no report)");
+            _statusChainLabel.style.unityFontStyleAndWeight = FontStyle.Normal;
+            _statusChainLabel.style.flexGrow = 1;
+            _statusChainLabel.style.color = new Color(0.75f, 0.75f, 0.75f);
+            _statusChainLabel.style.overflow = Overflow.Hidden;
+            _statusChainLabel.style.textOverflow = TextOverflow.Ellipsis;
+            bar.Add(_statusChainLabel);
+
+            _statusPpLabel = MakeBadgeLabel();
+            bar.Add(_statusPpLabel);
+            _statusMultiLabel = MakeBadgeLabel();
+            bar.Add(_statusMultiLabel);
+            _statusOrphanLabel = MakeBadgeLabel();
+            bar.Add(_statusOrphanLabel);
+            _statusInsigLabel = MakeBadgeLabel();
+            bar.Add(_statusInsigLabel);
+
+            var separator = new Label("│");
+            separator.style.color = new Color(0.4f, 0.4f, 0.4f);
+            separator.style.marginLeft = 6;
+            separator.style.marginRight = 6;
+            bar.Add(separator);
+
+            _statusLightmapLabel = MakeBadgeLabel();
+            bar.Add(_statusLightmapLabel);
+            _statusNetLabel = MakeBadgeLabel();
+            bar.Add(_statusNetLabel);
+            _statusFlagsLabel = MakeBadgeLabel();
+            bar.Add(_statusFlagsLabel);
+            _statusOtherLabel = MakeBadgeLabel();
+            bar.Add(_statusOtherLabel);
+
+            _statusElapsedLabel = new Label("");
+            _statusElapsedLabel.style.marginLeft = 8;
+            _statusElapsedLabel.style.color = new Color(0.6f, 0.6f, 0.6f);
+            _statusElapsedLabel.style.unityFontStyleAndWeight = FontStyle.Italic;
+            bar.Add(_statusElapsedLabel);
+
+            return bar;
+        }
+
+        private static Label MakeBadgeLabel()
+        {
+            var lbl = new Label
+            {
+                style =
+                {
+                    marginLeft = 4,
+                    marginRight = 4,
+                    unityFontStyleAndWeight = FontStyle.Bold
+                }
+            };
+            return lbl;
+        }
+
+        private void RefreshStatusBar()
+        {
+            if (_statusBar == null) return;
+
+            if (_report == null)
+            {
+                _statusChainLabel.text = "(no report)";
+                _statusPpLabel.text = "";
+                _statusMultiLabel.text = "";
+                _statusOrphanLabel.text = "";
+                _statusInsigLabel.text = "";
+                _statusLightmapLabel.text = "";
+                _statusNetLabel.text = "";
+                _statusFlagsLabel.text = "";
+                _statusOtherLabel.text = "";
+                _statusElapsedLabel.text = "";
+                return;
+            }
+
+            _statusChainLabel.text = _report.IsHierarchyMode
+                ? $"HIERARCHY · {_report.InstancesAnalyzed} instances · "
+                    + $"{_report.GameObjects.Count} objects with overrides"
+                : "Chain: " + string.Join(" → ",
+                    _report.Chain.Select(l => l.IsSceneInstance ? "[Scene]"
+                        : System.IO.Path.GetFileNameWithoutExtension(l.AssetPath)));
+
+            SetBadge(_statusPpLabel, "PP", _report.TotalPingPong,
+                new Color(1f, 0.35f, 0.35f));
+            SetBadge(_statusMultiLabel, "Multi", _report.TotalMultiOverride,
+                new Color(1f, 0.75f, 0.2f));
+            SetBadge(_statusOrphanLabel, "Orphan", _report.TotalOrphan,
+                new Color(0.65f, 0.65f, 0.65f));
+            SetBadge(_statusInsigLabel, "Insig", _report.TotalInsignificant,
+                new Color(0.5f, 0.8f, 1f));
+
+            var cats = GetCategoryCounts();
+            SetBadge(_statusLightmapLabel, "Lightmap", cats[OverrideCategory.Lightmap],
+                new Color(1f, 0.9f, 0.3f));
+            SetBadge(_statusNetLabel, "Net", cats[OverrideCategory.NetworkNoise],
+                new Color(0.45f, 0.9f, 0.7f));
+            SetBadge(_statusFlagsLabel, "Flags", cats[OverrideCategory.StaticFlags],
+                new Color(0.82f, 0.7f, 1f));
+            int other = cats[OverrideCategory.General]
+                + cats[OverrideCategory.Transform]
+                + cats[OverrideCategory.Name]
+                + cats[OverrideCategory.Material];
+            SetBadge(_statusOtherLabel, "Other", other,
+                new Color(0.75f, 0.75f, 0.75f));
+
+            _statusElapsedLabel.text = $"{_report.AnalysisTimeMs:F0}ms";
+        }
+
+        private static void SetBadge(Label label, string name, int count, Color activeColor)
+        {
+            label.text = $"{name}:{count}";
+            label.style.color = count > 0
+                ? activeColor
+                : new Color(0.45f, 0.45f, 0.45f);
         }
 
         private Dictionary<OverrideCategory, int> GetCategoryCounts()
@@ -491,111 +691,175 @@ namespace SashaRX.PrefabDoctor
             return counts;
         }
 
-        private static Dictionary<OverrideCategory, int> CountByCategory(AnalysisReport report)
+        // ── Left Panel: Virtualised ListView ───────────────────────
+
+        private VisualElement BuildLeftPanel()
         {
-            var counts = new Dictionary<OverrideCategory, int>
+            var panel = new VisualElement();
+            panel.style.flexGrow = 1;
+            panel.style.flexDirection = FlexDirection.Column;
+
+            _gameObjectListView = new ListView
             {
-                [OverrideCategory.General] = 0,
-                [OverrideCategory.Transform] = 0,
-                [OverrideCategory.Lightmap] = 0,
-                [OverrideCategory.NetworkNoise] = 0,
-                [OverrideCategory.StaticFlags] = 0,
-                [OverrideCategory.Name] = 0,
-                [OverrideCategory.Material] = 0,
+                fixedItemHeight = 20,
+                selectionType = SelectionType.Single,
+                reorderable = false,
+                showBorder = true,
+                showBoundCollectionSize = false,
+                showFoldoutHeader = false,
+                showAlternatingRowBackgrounds = AlternatingRowBackground.None,
+                horizontalScrollingEnabled = false,
+                virtualizationMethod = CollectionVirtualizationMethod.FixedHeight,
+                viewDataKey = "prefab-doctor-go-list",
+                makeItem = MakeGameObjectRow,
+                bindItem = BindGameObjectRow
             };
-            foreach (var go in report.GameObjects)
-            foreach (var c in go.Conflicts)
-                counts[c.Category]++;
-            return counts;
+            _gameObjectListView.style.flexGrow = 1;
+            _gameObjectListView.selectionChanged += OnGameObjectListSelectionChanged;
+            panel.Add(_gameObjectListView);
+
+            return panel;
         }
 
-        // ── Left Panel: GameObject Tree ────────────────────────────
-
-        private void DrawGameObjectList()
+        private VisualElement MakeGameObjectRow()
         {
-            var filteredGOs = GetFilteredGameObjects();
-            int visibleCount = Mathf.Min(filteredGOs.Count, k_MaxVisibleGOs);
+            var row = new VisualElement();
+            row.style.flexDirection = FlexDirection.Row;
+            row.style.alignItems = Align.Center;
+            row.style.paddingLeft = 4;
+            row.style.paddingRight = 4;
 
-            for (int i = 0; i < visibleCount; i++)
+            var dot = new VisualElement();
+            dot.name = "dot";
+            dot.style.width = 10;
+            dot.style.height = 10;
+            dot.style.marginRight = 6;
+            dot.style.borderTopLeftRadius = 5;
+            dot.style.borderTopRightRadius = 5;
+            dot.style.borderBottomLeftRadius = 5;
+            dot.style.borderBottomRightRadius = 5;
+            dot.style.flexShrink = 0;
+            row.Add(dot);
+
+            var name = new Label();
+            name.name = "name";
+            name.style.flexGrow = 1;
+            name.style.overflow = Overflow.Hidden;
+            name.style.textOverflow = TextOverflow.Ellipsis;
+            name.style.whiteSpace = WhiteSpace.NoWrap;
+            row.Add(name);
+
+            var counts = new Label();
+            counts.name = "counts";
+            counts.style.marginLeft = 4;
+            counts.style.color = new Color(0.65f, 0.65f, 0.65f);
+            counts.style.flexShrink = 0;
+            row.Add(counts);
+
+            return row;
+        }
+
+        private void BindGameObjectRow(VisualElement row, int index)
+        {
+            var filtered = GetFilteredGameObjects();
+            if (index < 0 || index >= filtered.Count) return;
+            var goReport = filtered[index];
+
+            var dot = row.Q<VisualElement>("dot");
+            var nameLabel = row.Q<Label>("name");
+            var countsLabel = row.Q<Label>("counts");
+
+            Color dotColor;
+            if (goReport.PingPongCount > 0) dotColor = new Color(1f, 0.3f, 0.3f);
+            else if (goReport.MultiOverrideCount > 0) dotColor = new Color(1f, 0.75f, 0.2f);
+            else if (goReport.OrphanCount > 0) dotColor = new Color(0.6f, 0.6f, 0.6f);
+            else dotColor = new Color(0.5f, 0.8f, 1f);
+            dot.style.backgroundColor = dotColor;
+
+            int slash = goReport.RelativePath.LastIndexOf('/');
+            nameLabel.text = slash >= 0
+                ? goReport.RelativePath[(slash + 1)..]
+                : goReport.RelativePath;
+            nameLabel.tooltip = goReport.RelativePath;
+
+            var sb = new System.Text.StringBuilder();
+            if (goReport.PingPongCount > 0) sb.Append("P:").Append(goReport.PingPongCount).Append(' ');
+            if (goReport.MultiOverrideCount > 0) sb.Append("M:").Append(goReport.MultiOverrideCount).Append(' ');
+            if (goReport.OrphanCount > 0) sb.Append("O:").Append(goReport.OrphanCount).Append(' ');
+            countsLabel.text = sb.ToString();
+        }
+
+        private void OnGameObjectListSelectionChanged(IEnumerable<object> _)
+        {
+            if (_muteGoListSync) return;
+            int idx = _gameObjectListView.selectedIndex;
+            if (idx == _selectedGoIndex) return;
+            _selectedGoIndex = idx;
+
+            RebuildConflictList();
+
+            var filtered = GetFilteredGameObjects();
+            if (idx >= 0 && idx < filtered.Count)
             {
-                var goReport = filteredGOs[i];
-                bool selected = _selectedGoIndex == i;
-
-                EditorGUILayout.BeginHorizontal(selected
-                    ? "SelectionRect"
-                    : GUIStyle.none);
-
-                // Severity icon
-                if (goReport.PingPongCount > 0)
-                    DrawColorDot(Color.red);
-                else if (goReport.MultiOverrideCount > 0)
-                    DrawColorDot(new Color(1f, 0.7f, 0f));
-                else if (goReport.OrphanCount > 0)
-                    DrawColorDot(new Color(0.6f, 0.6f, 0.6f));
-                else
-                    DrawColorDot(new Color(0.5f, 0.8f, 1f));
-
-                string displayName = goReport.RelativePath.Contains('/')
-                    ? goReport.RelativePath[(goReport.RelativePath.LastIndexOf('/') + 1)..]
-                    : goReport.RelativePath;
-
-                if (GUILayout.Button(displayName, EditorStyles.label))
+                var goReport = filtered[idx];
+                var sceneGO = ResolveByRelativePath(goReport.RelativePath);
+                if (sceneGO != null)
                 {
-                    _selectedGoIndex = i;
-
-                    // Phase 1: selection is keyed by stable ConflictHandle,
-                    // so switching left-panel GameObject no longer clears
-                    // the set. Previously-picked conflicts on other GOs
-                    // stay in the batch until the user reverts or explicitly
-                    // presses Select None. Rebuild the MCLV source for the
-                    // new GameObject and push stored selection back in.
-                    RebuildConflictList();
-
-                    // Ping + select the actual scene GameObject so the user
-                    // can jump straight from a row in the conflict list to
-                    // the object in the Hierarchy / Scene view. For reports
-                    // built from prefab-asset levels deep in the chain the
-                    // resolver returns null (no scene representation) and we
-                    // quietly skip the ping.
-                    var sceneGO = ResolveByRelativePath(goReport.RelativePath);
-                    if (sceneGO != null)
-                    {
-                        EditorGUIUtility.PingObject(sceneGO);
-                        Selection.activeGameObject = sceneGO;
-                    }
+                    EditorGUIUtility.PingObject(sceneGO);
+                    Selection.activeGameObject = sceneGO;
                 }
-
-                GUILayout.FlexibleSpace();
-
-                string counts = "";
-                if (goReport.PingPongCount > 0) counts += $"P:{goReport.PingPongCount} ";
-                if (goReport.MultiOverrideCount > 0) counts += $"M:{goReport.MultiOverrideCount} ";
-                if (goReport.OrphanCount > 0) counts += $"O:{goReport.OrphanCount} ";
-                GUILayout.Label(counts, EditorStyles.miniLabel);
-
-                EditorGUILayout.EndHorizontal();
-            }
-
-            if (filteredGOs.Count > visibleCount)
-            {
-                EditorGUILayout.Space(4);
-                EditorGUILayout.HelpBox(
-                    $"Showing first {visibleCount} of {filteredGOs.Count} GameObjects.\n"
-                    + "Narrow the filter (PingPongOnly / MultiOverrideOnly / a category) "
-                    + "to see fewer rows, or use Copy Report for the full list.",
-                    MessageType.Info);
             }
         }
 
-        private void DrawColorDot(Color color)
+        private void RefreshLeftPanel()
         {
-            var dotRect = GUILayoutUtility.GetRect(10, 10, GUILayout.Width(10), GUILayout.Height(16));
-            dotRect.y += 3;
-            dotRect.height = 10;
-            var prev = GUI.color;
-            GUI.color = color;
-            GUI.DrawTexture(dotRect, EditorGUIUtility.whiteTexture, ScaleMode.ScaleToFit);
-            GUI.color = prev;
+            if (_gameObjectListView == null) return;
+
+            var filtered = GetFilteredGameObjects();
+            _gameObjectListView.itemsSource = filtered;
+            _gameObjectListView.RefreshItems();
+
+            // Clamp & push selection without firing selectionChanged (which
+            // would re-ping the scene every time).
+            if (_selectedGoIndex >= filtered.Count) _selectedGoIndex = -1;
+            _muteGoListSync = true;
+            try
+            {
+                _gameObjectListView.SetSelectionWithoutNotify(
+                    _selectedGoIndex >= 0 ? new[] { _selectedGoIndex } : System.Array.Empty<int>());
+            }
+            finally { _muteGoListSync = false; }
+        }
+
+        // ── Empty state (UI Toolkit) ───────────────────────────────
+
+        private VisualElement BuildEmptyState()
+        {
+            var root = new VisualElement();
+            root.style.flexGrow = 1;
+            root.style.alignItems = Align.Center;
+            root.style.justifyContent = Justify.Center;
+
+            _emptyStateLabel = new Label("Click Analyze to begin.");
+            _emptyStateLabel.style.color = new Color(0.6f, 0.6f, 0.6f);
+            _emptyStateLabel.style.unityTextAlign = TextAnchor.MiddleCenter;
+            _emptyStateLabel.style.whiteSpace = WhiteSpace.Normal;
+            _emptyStateLabel.style.maxWidth = 360;
+            root.Add(_emptyStateLabel);
+
+            _emptyStateProgress = new ProgressBar
+            {
+                lowValue = 0f,
+                highValue = 100f,
+                value = 0f,
+                title = "0%"
+            };
+            _emptyStateProgress.style.width = 320;
+            _emptyStateProgress.style.marginTop = 12;
+            _emptyStateProgress.style.display = DisplayStyle.None;
+            root.Add(_emptyStateProgress);
+
+            return root;
         }
 
         /// <summary>
@@ -670,9 +934,8 @@ namespace SashaRX.PrefabDoctor
             panel.style.flexGrow = 1;
             panel.style.flexDirection = FlexDirection.Column;
 
-            _rightPanelHeaderImgui = new IMGUIContainer(DrawConflictListHeaderImgui);
-            _rightPanelHeaderImgui.style.flexShrink = 0;
-            panel.Add(_rightPanelHeaderImgui);
+            _conflictHeader = BuildConflictHeader();
+            panel.Add(_conflictHeader);
 
             _batchBar = BuildBatchBar();
             panel.Add(_batchBar);
@@ -828,29 +1091,74 @@ namespace SashaRX.PrefabDoctor
             lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
         }
 
-        private void DrawConflictListHeaderImgui()
+        private VisualElement BuildConflictHeader()
         {
-            if (_report == null) return;
+            var header = new VisualElement();
+            header.style.flexDirection = FlexDirection.Row;
+            header.style.alignItems = Align.Center;
+            header.style.flexShrink = 0;
+            header.style.paddingLeft = 6;
+            header.style.paddingRight = 6;
+            header.style.paddingTop = 4;
+            header.style.paddingBottom = 4;
 
-            var filteredGOs = GetFilteredGameObjects();
-            if (_selectedGoIndex < 0 || _selectedGoIndex >= filteredGOs.Count)
+            _conflictHeaderLabel = new Label();
+            _conflictHeaderLabel.style.flexGrow = 1;
+            _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+            _conflictHeaderLabel.style.overflow = Overflow.Hidden;
+            _conflictHeaderLabel.style.textOverflow = TextOverflow.Ellipsis;
+            _conflictHeaderLabel.style.whiteSpace = WhiteSpace.NoWrap;
+            header.Add(_conflictHeaderLabel);
+
+            _conflictHeaderPingButton = new Button(OnHeaderPingClicked) { text = "Ping" };
+            _conflictHeaderPingButton.style.flexShrink = 0;
+            _conflictHeaderPingButton.style.display = DisplayStyle.None;
+            header.Add(_conflictHeaderPingButton);
+
+            return header;
+        }
+
+        private void OnHeaderPingClicked()
+        {
+            if (_report == null || _selectedGoIndex < 0) return;
+            var filtered = GetFilteredGameObjects();
+            if (_selectedGoIndex >= filtered.Count) return;
+            var go = filtered[_selectedGoIndex];
+            if (go.Instance != null)
             {
-                EditorGUILayout.HelpBox(
-                    "Select a GameObject on the left to view its overrides.",
-                    MessageType.Info);
+                EditorGUIUtility.PingObject(go.Instance);
+                Selection.activeGameObject = go.Instance;
+            }
+        }
+
+        private void RefreshConflictHeader()
+        {
+            if (_conflictHeaderLabel == null) return;
+            if (_report == null || _selectedGoIndex < 0)
+            {
+                _conflictHeaderLabel.text = "Select a GameObject on the left to view its overrides.";
+                _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Italic;
+                _conflictHeaderLabel.style.color = new Color(0.6f, 0.6f, 0.6f);
+                _conflictHeaderPingButton.style.display = DisplayStyle.None;
                 return;
             }
 
-            var goReport = filteredGOs[_selectedGoIndex];
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField(goReport.RelativePath, EditorStyles.boldLabel);
-            if (goReport.Instance != null &&
-                GUILayout.Button("Ping", EditorStyles.miniButton, GUILayout.Width(40)))
+            var filtered = GetFilteredGameObjects();
+            if (_selectedGoIndex >= filtered.Count)
             {
-                EditorGUIUtility.PingObject(goReport.Instance);
-                Selection.activeGameObject = goReport.Instance;
+                _conflictHeaderLabel.text = "(GameObject out of range)";
+                _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Italic;
+                _conflictHeaderLabel.style.color = new Color(0.6f, 0.6f, 0.6f);
+                _conflictHeaderPingButton.style.display = DisplayStyle.None;
+                return;
             }
-            EditorGUILayout.EndHorizontal();
+
+            var goReport = filtered[_selectedGoIndex];
+            _conflictHeaderLabel.text = goReport.RelativePath;
+            _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+            _conflictHeaderLabel.style.color = new Color(0.9f, 0.9f, 0.9f);
+            _conflictHeaderPingButton.style.display =
+                goReport.Instance != null ? DisplayStyle.Flex : DisplayStyle.None;
         }
 
         // ── Batch action bar ───────────────────────────────────────
@@ -872,24 +1180,40 @@ namespace SashaRX.PrefabDoctor
             _batchCountLabel = new Label("0 selected");
             _batchCountLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
             _batchCountLabel.style.marginRight = 8;
-            _batchCountLabel.style.minWidth = 140;
+            _batchCountLabel.style.minWidth = 180;
             bar.Add(_batchCountLabel);
 
-            var selectAll = new Button(SelectAllVisible) { text = "Select All Visible" };
-            selectAll.style.marginLeft = 0;
-            bar.Add(selectAll);
+            // Scope: current GameObject's visible rows only.
+            var selectVisible = new Button(SelectVisible) { text = "Select Visible" };
+            selectVisible.tooltip = "Select every row currently displayed in the "
+                + "right panel (the current GameObject, with the active filter).";
+            bar.Add(selectVisible);
+
+            // Scope: every conflict in the whole report matching the current
+            // filter — spans all GameObjects at once.
+            var selectAllMatching = new Button(SelectAllMatching) { text = "Select All Matching" };
+            selectAllMatching.tooltip = "Select every conflict in the entire "
+                + "report that matches the current filter. Use with "
+                + "LightmapOnly / NetworkNoiseOnly / GarbageOnly for Level-wide cleanups.";
+            selectAllMatching.style.color = new Color(0.55f, 0.85f, 1f);
+            bar.Add(selectAllMatching);
 
             var selectNone = new Button(SelectNone) { text = "Select None" };
+            selectNone.tooltip = "Clear all selections across all GameObjects.";
             bar.Add(selectNone);
 
             var spacer = new VisualElement { style = { flexGrow = 1 } };
             bar.Add(spacer);
 
             var revert = new Button(RevertSelected) { text = "Revert Selected" };
+            revert.tooltip = "Revert every selected conflict (cross-GameObject). "
+                + "Hierarchy mode pins each conflict to its own nested "
+                + "PrefabInstance owner. One Undo group for the whole batch.";
             revert.style.color = new Color(1f, 0.85f, 0.55f);
             bar.Add(revert);
 
             var copy = new Button(CopySelectedPropertyPaths) { text = "Copy Paths" };
+            copy.tooltip = "Copy every selected conflict's property path to the clipboard.";
             bar.Add(copy);
 
             return bar;
@@ -960,6 +1284,7 @@ namespace SashaRX.PrefabDoctor
             _conflictListView.RefreshItems();
             PushSelectionToListView();
             UpdateBatchBar();
+            RefreshConflictHeader();
         }
 
         /// <summary>
@@ -1041,7 +1366,12 @@ namespace SashaRX.PrefabDoctor
 
         // ── Batch action handlers ──────────────────────────────────
 
-        private void SelectAllVisible()
+        /// <summary>
+        /// Adds every row currently materialised in the MCLV (the current
+        /// GameObject's conflicts that pass the active filter) to
+        /// <c>_selectedConflicts</c>. Other GameObjects' selections stay.
+        /// </summary>
+        private void SelectVisible()
         {
             foreach (var row in _conflictRows)
                 _selectedConflicts.Add(row.Handle);
@@ -1049,6 +1379,42 @@ namespace SashaRX.PrefabDoctor
             UpdateBatchBar();
         }
 
+        /// <summary>
+        /// Report-wide Select All: walk every GameObjectReport and every
+        /// PropertyConflict in the whole report, keep only those that pass
+        /// the active filter, and add their handles to
+        /// <c>_selectedConflicts</c>. Previous selection is preserved (Add
+        /// semantics). This is the Level-wide cleanup entry point — set a
+        /// category filter (e.g. LightmapOnly), press this, then Revert
+        /// Selected to fix every matching conflict across every GameObject
+        /// in one batch.
+        /// </summary>
+        private void SelectAllMatching()
+        {
+            if (_report == null) return;
+
+            int added = 0;
+            for (int gi = 0; gi < _report.GameObjects.Count; gi++)
+            {
+                var go = _report.GameObjects[gi];
+                for (int ci = 0; ci < go.Conflicts.Count; ci++)
+                {
+                    if (!PassesFilter(go.Conflicts[ci])) continue;
+                    if (_selectedConflicts.Add(new ConflictHandle(gi, ci)))
+                        added++;
+                }
+            }
+
+            Debug.Log($"[Prefab Doctor] Select All Matching: added {added} conflicts "
+                + $"(filter: {_filterMode}); total selection: {_selectedConflicts.Count}");
+
+            PushSelectionToListView();
+            UpdateBatchBar();
+        }
+
+        /// <summary>
+        /// Clears the entire cross-GameObject selection set.
+        /// </summary>
         private void SelectNone()
         {
             _selectedConflicts.Clear();
@@ -1250,10 +1616,27 @@ namespace SashaRX.PrefabDoctor
                 _report = _analyzer.Analyze(_target, _subtreeRoot);
                 _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
                 _selectedConflicts.Clear();
-                RebuildConflictList();
+                RefreshAfterReportChange();
             }
 
             Repaint();
+        }
+
+        /// <summary>
+        /// Refresh every UI Toolkit element whose content depends on
+        /// <c>_report</c>: top toolbar (Clean Orphans label), status bar
+        /// (counts + chain), left panel (GameObject list items), empty
+        /// state (visibility), and the right-panel conflict list
+        /// (MCLV items source). Single entry point so nothing gets
+        /// forgotten when a new report arrives.
+        /// </summary>
+        private void RefreshAfterReportChange()
+        {
+            RefreshTopToolbar();
+            RefreshStatusBar();
+            RefreshLeftPanel();
+            RebuildConflictList();
+            RefreshEmptyState();
         }
 
         private void RunHierarchyAnalysis()
@@ -1361,13 +1744,12 @@ namespace SashaRX.PrefabDoctor
                         + $"{_report.TotalInsignificant} insignificant, "
                         + $"{_report.AnalysisTimeMs:F0}ms");
 
-                    RebuildConflictList();
-                    Repaint();
+                    RefreshAfterReportChange();
                     return;
                 }
                 _progress = _hierarchyJob.Current;
             }
-            Repaint();
+            RefreshEmptyState();
         }
 
         private void DoCleanOrphansHierarchy()
@@ -1444,13 +1826,12 @@ namespace SashaRX.PrefabDoctor
                     _incrementalJob = null;
                     _pendingReport = null;
                     EditorApplication.update -= PumpIncrementalJob;
-                    RebuildConflictList();
-                    Repaint();
+                    RefreshAfterReportChange();
                     return;
                 }
                 _progress = _incrementalJob.Current;
             }
-            Repaint();
+            RefreshEmptyState();
         }
 
         private void OnEnable()
@@ -1632,38 +2013,5 @@ namespace SashaRX.PrefabDoctor
             }
         }
 
-        private void DrawEmptyState()
-        {
-            GUILayout.FlexibleSpace();
-            EditorGUILayout.BeginHorizontal();
-            GUILayout.FlexibleSpace();
-
-            if (_incrementalJob != null)
-            {
-                // Progress bar during incremental analysis
-                EditorGUILayout.BeginVertical(GUILayout.Width(300));
-                EditorGUILayout.LabelField("Analyzing...", EditorStyles.centeredGreyMiniLabel);
-                var rect = GUILayoutUtility.GetRect(300, 20);
-                EditorGUI.ProgressBar(rect, _progress, $"{(_progress * 100):F0}%");
-                EditorGUILayout.EndVertical();
-            }
-            else if (_target == null)
-            {
-                EditorGUILayout.LabelField(
-                    "Select a prefab instance and click Analyze\nor drag it into the target field.",
-                    EditorStyles.centeredGreyMiniLabel, GUILayout.Width(300));
-            }
-            else if (_report != null && _report.GameObjects.Count == 0)
-            {
-                EditorGUILayout.LabelField(
-                    "No conflicts found.\n" +
-                    (_report.IsComplete ? "Prefab is clean." : "Analysis incomplete."),
-                    EditorStyles.centeredGreyMiniLabel, GUILayout.Width(300));
-            }
-
-            GUILayout.FlexibleSpace();
-            EditorGUILayout.EndHorizontal();
-            GUILayout.FlexibleSpace();
-        }
     }
 }
