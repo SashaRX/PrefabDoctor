@@ -1501,6 +1501,15 @@ namespace SashaRX.PrefabDoctor
         {
             if (_report == null) yield break;
 
+            // Hierarchy mode: use the GoPathToInstanceRoot mapping built
+            // during analysis instead of walking the scene hierarchy per
+            // conflict. This is both faster (O(1) lookup vs O(depth) walk)
+            // and correct (the old ResolveByRelativePath failed on
+            // hier-prefixed paths that don't start with the root's name).
+            var pathMap = _report.IsHierarchyMode
+                ? _report.GoPathToInstanceRoot
+                : null;
+
             foreach (var handle in handles)
             {
                 if (handle.GoReportIndex < 0
@@ -1512,12 +1521,10 @@ namespace SashaRX.PrefabDoctor
                 var conflict = go.Conflicts[handle.ConflictIndex];
 
                 GameObject instanceRoot;
-                if (_report.IsHierarchyMode)
+                if (pathMap != null)
                 {
-                    var sceneGo = ResolveByRelativePath(go.RelativePath);
-                    if (sceneGo == null) continue;
-                    instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(sceneGo);
-                    if (instanceRoot == null) continue;
+                    if (!pathMap.TryGetValue(go.RelativePath, out instanceRoot)
+                        || instanceRoot == null) continue;
                 }
                 else
                 {

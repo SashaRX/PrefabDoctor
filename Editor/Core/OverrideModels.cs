@@ -153,5 +153,15 @@ namespace SashaRX.PrefabDoctor
         /// real scene GameObjects without re-walking the hierarchy.
         /// </summary>
         public List<GameObject> HierarchyInstanceRoots = new();
+
+        /// <summary>
+        /// Mapping from <see cref="GameObjectReport.RelativePath"/> to the
+        /// PrefabInstance root that owns it. Populated only in hierarchy
+        /// mode. Used by <c>ResolveBatchTasks</c> to dispatch each
+        /// conflict to the correct nested instance root for
+        /// <see cref="OverrideActions.BatchRevert"/>, bypassing the
+        /// expensive and fragile <c>ResolveByRelativePath</c> path walk.
+        /// </summary>
+        public Dictionary<string, GameObject> GoPathToInstanceRoot;
     }
 }

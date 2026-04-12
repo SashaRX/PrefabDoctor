@@ -576,6 +576,7 @@ namespace SashaRX.PrefabDoctor
             report.Chain = BuildChain(root);
 
             var goReports = new Dictionary<string, GameObjectReport>();
+            var goPathToRoot = new Dictionary<string, GameObject>();
             int total = instanceRoots.Count;
 
             // Chain template cache: many scene instances share the same
@@ -631,7 +632,10 @@ namespace SashaRX.PrefabDoctor
 
                         var conflict = ClassifyConflict(prefixedKey, kvp.Value, chain);
                         if (conflict != null)
+                        {
                             AddConflictToReport(goReports, conflict, report);
+                            goPathToRoot.TryAdd(conflict.Key.GameObjectPath, instanceRoot);
+                        }
                     }
 
                     // Quaternion groups.
@@ -657,7 +661,10 @@ namespace SashaRX.PrefabDoctor
 
                         var conflict = ClassifyQuaternionGroup(prefixedQg);
                         if (conflict != null)
+                        {
                             AddConflictToReport(goReports, conflict, report);
+                            goPathToRoot.TryAdd(conflict.Key.GameObjectPath, instanceRoot);
+                        }
                     }
                 }
 
@@ -672,6 +679,7 @@ namespace SashaRX.PrefabDoctor
                 .ThenByDescending(g => g.InsignificantCount)
                 .ToList();
 
+            report.GoPathToInstanceRoot = goPathToRoot;
             report.IsComplete = true;
             EndRun();
             report.AnalysisTimeMs = sw.ElapsedMilliseconds;
