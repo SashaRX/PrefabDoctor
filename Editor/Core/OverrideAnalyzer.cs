@@ -133,6 +133,56 @@ namespace SashaRX.PrefabDoctor
             return chain;
         }
 
+        /// <summary>
+        /// Build a chain for <paramref name="instanceRoot"/>, reusing a
+        /// cached template for depth 1+ if one exists. Many scene instances
+        /// share the same prefab asset, so their chains are structurally
+        /// identical from depth 1 onward — only depth 0 (the scene
+        /// instance itself) differs. Caching saves
+        /// O(chain_depth × Unity_API_call) per duplicate instance.
+        /// </summary>
+        private List<NestingLevel> BuildChainCached(
+            GameObject instanceRoot,
+            Dictionary<string, List<NestingLevel>> templateCache)
+        {
+            // Get the immediate source prefab for the cache key.
+            var source = PrefabUtility.GetCorrespondingObjectFromSource(instanceRoot);
+            string cacheKey = source != null ? AssetDatabase.GetAssetPath(source) : null;
+
+            if (!string.IsNullOrEmpty(cacheKey)
+                && templateCache.TryGetValue(cacheKey, out var template))
+            {
+                // Template hit: build depth 0 from the instance, append
+                // the cached depth 1+ levels unchanged.
+                string rootPath = AssetDatabase.GetAssetPath(instanceRoot);
+                bool isScene = string.IsNullOrEmpty(rootPath)
+                    || rootPath.EndsWith(".unity", System.StringComparison.OrdinalIgnoreCase);
+
+                var chain = new List<NestingLevel>(template.Count + 1);
+                chain.Add(new NestingLevel
+                {
+                    Depth = 0,
+                    Root = instanceRoot,
+                    AssetPath = rootPath,
+                    IsSceneInstance = isScene
+                });
+                chain.AddRange(template);
+                return chain;
+            }
+
+            // Miss: full BuildChain, then cache depth 1+ as template.
+            var fullChain = BuildChain(instanceRoot);
+            if (!string.IsNullOrEmpty(cacheKey) && fullChain.Count >= 2)
+            {
+                var tmpl = new List<NestingLevel>(fullChain.Count - 1);
+                for (int t = 1; t < fullChain.Count; t++)
+                    tmpl.Add(fullChain[t]);
+                templateCache[cacheKey] = tmpl;
+            }
+
+            return fullChain;
+        }
+
         // ── Override Collection ────────────────────────────────────
 
         public Dictionary<PropertyKey, List<OverrideEntry>> CollectOverrides(
@@ -144,6 +194,31 @@ namespace SashaRX.PrefabDoctor
             // unit tests) rely on.
             foreach (var _ in CollectOverridesIncremental(chain, map, subtreeRoot, 0f)) { }
             return map;
+        }
+
+        /// <summary>
+        /// Non-yielding override collection for hierarchy mode. Same
+        /// logic as <see cref="CollectOverridesIncremental"/> but without
+        /// the IEnumerator state-machine overhead and per-mod yield
+        /// points. The hierarchy pump already uses a 200ms budget and
+        /// yields at instance boundaries; mid-instance yields are pure
+        /// overhead on scenes with millions of mods.
+        /// </summary>
+        private void CollectOverridesFast(
+            List<NestingLevel> chain,
+            Dictionary<PropertyKey, List<OverrideEntry>> map)
+        {
+            for (int i = 0; i < chain.Count; i++)
+            {
+                var level = chain[i];
+                if (level.IsSceneInstance && !IncludeSceneOverrides) continue;
+
+                var mods = PrefabUtility.GetPropertyModifications(level.Root);
+                if (mods == null) continue;
+
+                for (int m = 0; m < mods.Length; m++)
+                    ProcessMod(mods[m], level, map, null);
+            }
         }
 
         /// <summary>
@@ -379,15 +454,13 @@ namespace SashaRX.PrefabDoctor
             var goReports = new Dictionary<string, GameObjectReport>();
             int total = instanceRoots.Count;
 
-            // Mid-instance yielding: a single heavyweight instance (e.g. one
-            // with thousands of NetworkBehaviours backing fields) can do
-            // orders of magnitude more work than a lightweight one. Yielding
-            // only between instances was enough to freeze Unity's main
-            // thread for seconds whenever we hit a heavy one. Cap the
-            // per-MoveNext classification budget so the pump in the window
-            // can interleave UI events even inside a single instance.
-            const int classifyBudgetPerYield = 200;
-            int classifiedSinceYield = 0;
+            // Chain template cache: many scene instances share the same
+            // prefab asset (e.g. 200× Crate_01). BuildChain is O(depth)
+            // Unity API calls per invocation; caching the template
+            // (depth 1+, which is identical for all instances of the
+            // same prefab) reduces chain-build cost from O(instances ×
+            // depth) to O(unique_prefabs × depth + instances × 1).
+            var chainTemplateCache = new Dictionary<string, List<NestingLevel>>();
 
             for (int idx = 0; idx < total; idx++)
             {
@@ -400,22 +473,21 @@ namespace SashaRX.PrefabDoctor
                 // Record the concrete scene GameObject so the bulk Clean
                 // Orphans action can later call PrefabUtility.SetProperty-
                 // Modifications on it without re-walking the hierarchy.
-                if (instanceRoot != null)
-                    report.HierarchyInstanceRoots.Add(instanceRoot);
+                report.HierarchyInstanceRoots.Add(instanceRoot);
 
-                var chain = BuildChain(instanceRoot);
+                var chain = BuildChainCached(instanceRoot, chainTemplateCache);
                 if (chain.Count >= 2)
                 {
                     float progress = (float)idx / total;
 
-                    // Collect overrides incrementally — on scene instances
-                    // with thousands of network backing fields, even the
-                    // collection phase (per-mod PrefabUtility.IsDefaultOverride
-                    // calls) is enough to trigger Unity's 'Hold on' dialog
-                    // if we do it all in one go.
+                    // Collect ALL overrides for this instance in one pass
+                    // (no per-mod yielding). The pump in PumpHierarchyJob
+                    // uses a 200ms budget, so mid-instance yields just add
+                    // IEnumerator state-machine overhead without improving
+                    // Cancel responsiveness. We yield once at the instance
+                    // boundary instead.
                     var overrideMap = new Dictionary<PropertyKey, List<OverrideEntry>>();
-                    foreach (float p in CollectOverridesIncremental(chain, overrideMap, null, progress))
-                        yield return p;
+                    CollectOverridesFast(chain, overrideMap);
 
                     // Scalar properties — classify and merge with hier-prefixed paths.
                     foreach (var kvp in overrideMap)
@@ -436,12 +508,6 @@ namespace SashaRX.PrefabDoctor
                         var conflict = ClassifyConflict(prefixedKey, kvp.Value, chain);
                         if (conflict != null)
                             AddConflictToReport(goReports, conflict, report);
-
-                        if (++classifiedSinceYield >= classifyBudgetPerYield)
-                        {
-                            classifiedSinceYield = 0;
-                            yield return progress;
-                        }
                     }
 
                     // Quaternion groups.
@@ -468,17 +534,11 @@ namespace SashaRX.PrefabDoctor
                         var conflict = ClassifyQuaternionGroup(prefixedQg);
                         if (conflict != null)
                             AddConflictToReport(goReports, conflict, report);
-
-                        if (++classifiedSinceYield >= classifyBudgetPerYield)
-                        {
-                            classifiedSinceYield = 0;
-                            yield return progress;
-                        }
                     }
                 }
 
-                // Always yield at the instance boundary so progress ticks
-                // smoothly even for empty / lightweight instances.
+                // Yield once per instance — the pump's 200ms budget
+                // decides how many instances fit into one tick.
                 yield return total > 0 ? (float)(idx + 1) / total : 1f;
             }
 

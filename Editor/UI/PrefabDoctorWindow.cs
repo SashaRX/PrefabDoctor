@@ -1725,11 +1725,15 @@ namespace SashaRX.PrefabDoctor
                 return;
             }
 
-            // Advance the enumerator for up to ~16ms — one editor frame
-            // worth of work — then yield back to the editor so the UI
-            // stays responsive and the Cancel button stays clickable.
+            // Advance the enumerator for up to 200ms per pump tick.
+            // The hierarchy scan runs behind a modal DisplayCancelable-
+            // ProgressBar, so 60fps responsiveness is not needed — the
+            // only UI the user interacts with is the Cancel button,
+            // which we check at the top of every tick. 200ms gives
+            // ~12x throughput vs the old 16ms budget while still keeping
+            // Cancel latency under a quarter second.
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 16)
+            while (sw.ElapsedMilliseconds < 200)
             {
                 if (!_hierarchyJob.MoveNext())
                 {
