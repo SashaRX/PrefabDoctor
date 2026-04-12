@@ -45,6 +45,12 @@ namespace SashaRX.PrefabDoctor
         private bool _showInternalProps;
         private FilterMode _filterMode = FilterMode.ConflictsOnly;
 
+        // Auto-ping: when true, clicking a GO in the left panel pings it
+        // in the Hierarchy/Scene view. On large scenes (hierarchy mode)
+        // the ping + Selection change can freeze Unity. Toggle off to
+        // navigate the report without scene-side lag.
+        private bool _autoPing = true;
+
         // UI state
         private int _selectedGoIndex = -1;
 
@@ -194,7 +200,11 @@ namespace SashaRX.PrefabDoctor
             /// <summary>Transform category only (position / rotation / scale deltas).</summary>
             TransformOnly,
             /// <summary>Orphans + any MultiOverride — the "broken or redundant" set.</summary>
-            GarbageOnly
+            GarbageOnly,
+            /// <summary>Auto-generated noise: Lightmap + NetworkNoise + StaticFlags.</summary>
+            NoiseOnly,
+            /// <summary>Everything that needs fixing: PingPong + Multi + Orphan.</summary>
+            ActionableOnly
         }
 
         // ── Main Layout ────────────────────────────────────────────
@@ -451,6 +461,12 @@ namespace SashaRX.PrefabDoctor
             _internalToggle.RegisterValueChangedCallback(evt => _showInternalProps = evt.newValue);
             toolbar.Add(_internalToggle);
 
+            var pingToggle = new ToolbarToggle { text = "Ping", value = _autoPing };
+            pingToggle.tooltip = "Auto-ping scene object on left-panel click. "
+                + "Disable in hierarchy mode if ping causes lag on large scenes.";
+            pingToggle.RegisterValueChangedCallback(evt => _autoPing = evt.newValue);
+            toolbar.Add(pingToggle);
+
             _cleanOrphansButton = new ToolbarButton(OnCleanOrphansClicked)
             { text = "Clean Orphans" };
             toolbar.Add(_cleanOrphansButton);
@@ -490,6 +506,8 @@ namespace SashaRX.PrefabDoctor
             FilterMode.GraphicsOnly => "Graphics Only",
             FilterMode.TransformOnly => "Transform Only",
             FilterMode.GarbageOnly => "Garbage Only",
+            FilterMode.NoiseOnly => "Noise Only",
+            FilterMode.ActionableOnly => "Actionable Only",
             _ => mode.ToString()
         };
 
@@ -798,15 +816,18 @@ namespace SashaRX.PrefabDoctor
 
             RebuildConflictList();
 
-            var filtered = GetFilteredGameObjects();
-            if (idx >= 0 && idx < filtered.Count)
+            if (_autoPing)
             {
-                var goReport = filtered[idx];
-                var sceneGO = ResolveByRelativePath(goReport.RelativePath);
-                if (sceneGO != null)
+                var filtered = GetFilteredGameObjects();
+                if (idx >= 0 && idx < filtered.Count)
                 {
-                    EditorGUIUtility.PingObject(sceneGO);
-                    Selection.activeGameObject = sceneGO;
+                    var goReport = filtered[idx];
+                    var sceneGO = ResolveByRelativePath(goReport.RelativePath);
+                    if (sceneGO != null)
+                    {
+                        EditorGUIUtility.PingObject(sceneGO);
+                        Selection.activeGameObject = sceneGO;
+                    }
                 }
             }
         }
@@ -1909,6 +1930,12 @@ namespace SashaRX.PrefabDoctor
                     OverrideCategory.Transform),
                 FilterMode.GarbageOnly => FilterGameObjects(static g =>
                     g.OrphanCount > 0 || g.MultiOverrideCount > 0),
+                FilterMode.NoiseOnly => FilterByCategories(
+                    OverrideCategory.Lightmap,
+                    OverrideCategory.NetworkNoise,
+                    OverrideCategory.StaticFlags),
+                FilterMode.ActionableOnly => FilterGameObjects(static g =>
+                    g.PingPongCount > 0 || g.MultiOverrideCount > 0 || g.OrphanCount > 0),
                 _ => _report.GameObjects
             };
 
@@ -1986,6 +2013,14 @@ namespace SashaRX.PrefabDoctor
                 FilterMode.GarbageOnly =>
                     conflict.Severity == ConflictSeverity.Orphan
                     || conflict.Severity == ConflictSeverity.MultiOverride,
+                FilterMode.NoiseOnly =>
+                    conflict.Category == OverrideCategory.Lightmap
+                    || conflict.Category == OverrideCategory.NetworkNoise
+                    || conflict.Category == OverrideCategory.StaticFlags,
+                FilterMode.ActionableOnly =>
+                    conflict.Severity == ConflictSeverity.PingPong
+                    || conflict.Severity == ConflictSeverity.MultiOverride
+                    || conflict.Severity == ConflictSeverity.Orphan,
                 _ => true
             };
         }
