@@ -25,6 +25,16 @@ namespace SashaRX.PrefabDoctor
         public bool IncludeSceneOverrides = false;
         public bool IncludeInternalProperties = false;
 
+        /// <summary>
+        /// When true, <see cref="ClassifyConflict"/> skips the expensive
+        /// <see cref="CheckInsignificant"/> path (which opens a
+        /// SerializedObject to compare values with epsilon). All
+        /// single-depth overrides are classified as Insignificant
+        /// directly. Actionable counts (PingPong, MultiOverride, Orphan)
+        /// are unaffected. Set automatically in hierarchy mode.
+        /// </summary>
+        public bool FastClassify = false;
+
         private static readonly string[] s_InternalPrefixes =
         {
             "m_CorrespondingSourceObject",
@@ -673,11 +683,19 @@ namespace SashaRX.PrefabDoctor
                 yield return total > 0 ? (float)(idx + 1) / total : 1f;
             }
 
-            report.GameObjects = goReports.Values
-                .OrderByDescending(g => g.PingPongCount)
-                .ThenByDescending(g => g.MultiOverrideCount)
-                .ThenByDescending(g => g.InsignificantCount)
-                .ToList();
+            // In-place sort avoids the LINQ OrderByDescending chain which
+            // allocates intermediate arrays — on 8.8M GoReports that chain
+            // triggers multiple GC collections.
+            var goList = new List<GameObjectReport>(goReports.Values);
+            goList.Sort(static (a, b) =>
+            {
+                int c = b.PingPongCount.CompareTo(a.PingPongCount);
+                if (c != 0) return c;
+                c = b.MultiOverrideCount.CompareTo(a.MultiOverrideCount);
+                if (c != 0) return c;
+                return b.InsignificantCount.CompareTo(a.InsignificantCount);
+            });
+            report.GameObjects = goList;
 
             report.GoPathToInstanceRoot = goPathToRoot;
             report.IsComplete = true;
@@ -990,15 +1008,21 @@ namespace SashaRX.PrefabDoctor
 
             if (entries.Count == 1)
             {
-                // Known-noise categories (NetworkNoise, Lightmap) are shortcut
-                // to Insignificant without opening a SerializedObject — those
-                // properties are shut off from gameplay by design and the
-                // expensive FindProperty round-trip dominates cost on scenes
-                // with lots of networking/lightmap data (the whole reason a
-                // Level with thousands of nested instances was freezing the
-                // editor for minutes).
+                // Known-noise categories are always Insignificant without SO.
                 if (conflict.Category == OverrideCategory.NetworkNoise
                     || conflict.Category == OverrideCategory.Lightmap)
+                {
+                    conflict.Severity = ConflictSeverity.Insignificant;
+                    return conflict;
+                }
+
+                // FastClassify (hierarchy mode): skip the expensive
+                // SerializedObject-based CheckInsignificant. All single-
+                // depth overrides are classified as Insignificant. This
+                // slightly overcounts (a real override with one depth
+                // entry gets marked insignificant instead of null), but
+                // PingPong/Multi/Orphan detection is unaffected.
+                if (FastClassify)
                 {
                     conflict.Severity = ConflictSeverity.Insignificant;
                     return conflict;

@@ -1630,6 +1630,7 @@ namespace SashaRX.PrefabDoctor
             _analyzer.IncludeDefaultOverrides = _showDefaults;
             _analyzer.IncludeSceneOverrides = _showSceneOverrides;
             _analyzer.IncludeInternalProperties = _showInternalProps;
+            _analyzer.FastClassify = false; // instance mode: full SO check
 
             if (_useIncremental)
             {
@@ -1687,6 +1688,7 @@ namespace SashaRX.PrefabDoctor
             _analyzer.IncludeDefaultOverrides = _showDefaults;
             _analyzer.IncludeSceneOverrides = true; // hierarchy mode always includes scene
             _analyzer.IncludeInternalProperties = _showInternalProps;
+            _analyzer.FastClassify = true; // skip SO-based insignificant check
 
             // Rough total for the progress bar — the analyzer itself will
             // add the root to its own list separately, so this is a lower
