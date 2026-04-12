@@ -270,7 +270,7 @@ namespace SashaRX.PrefabDoctor
             cols.Add(catCol);
 
             var prefabCol = new Column { name = "prefab", title = "Prefab", stretchable = false };
-            prefabCol.width = 200; prefabCol.makeCell = () => MakeScanLabel(); prefabCol.bindCell = BindPrefabCell;
+            prefabCol.width = 200; prefabCol.makeCell = MakePrefabCell; prefabCol.bindCell = BindPrefabCell;
             cols.Add(prefabCol);
 
             var detailsCol = new Column { name = "details", title = "Details", stretchable = true };
@@ -328,19 +328,28 @@ namespace SashaRX.PrefabDoctor
             };
         }
 
-        private void BindPrefabCell(VisualElement el, int idx)
+        private Label MakePrefabCell()
         {
-            var lbl = (Label)el;
-            if (idx < 0 || _filteredCache == null || idx >= _filteredCache.Count) { lbl.text = ""; return; }
-            var r = _filteredCache[idx]; lbl.userData = idx;
-            lbl.text = r.DisplayName;
-            lbl.tooltip = r.AssetPath;
+            var lbl = MakeScanLabel();
             lbl.style.color = new Color(0.4f, 0.7f, 1f);
             lbl.RegisterCallback<ClickEvent>(e =>
             {
-                var obj = AssetDatabase.LoadMainAssetAtPath(r.AssetPath);
-                if (obj != null) { EditorGUIUtility.PingObject(obj); Selection.activeObject = obj; }
+                if (lbl.userData is int i && _filteredCache != null && i >= 0 && i < _filteredCache.Count)
+                {
+                    var obj = AssetDatabase.LoadMainAssetAtPath(_filteredCache[i].AssetPath);
+                    if (obj != null) { EditorGUIUtility.PingObject(obj); Selection.activeObject = obj; }
+                }
             });
+            return lbl;
+        }
+
+        private void BindPrefabCell(VisualElement el, int idx)
+        {
+            var lbl = (Label)el;
+            if (idx < 0 || _filteredCache == null || idx >= _filteredCache.Count) { lbl.text = ""; lbl.userData = -1; return; }
+            var r = _filteredCache[idx]; lbl.userData = idx;
+            lbl.text = r.DisplayName;
+            lbl.tooltip = r.AssetPath;
         }
 
         private void BindDetailsCell(VisualElement el, int idx)
