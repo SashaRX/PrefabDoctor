@@ -214,6 +214,10 @@ namespace SashaRX.PrefabDoctor
                 var root = scope.prefabContentsRoot;
                 if (root == null) return 0;
 
+                // Pre-clean missing scripts so Dispose can save.
+                int dummy = 0;
+                RemoveMissingScriptsRecursive(root.transform, ref dummy);
+
                 // Collect every nested prefab instance root inside this
                 // loaded prefab. A variant prefab's own root is itself an
                 // instance, so include it too.
@@ -495,8 +499,14 @@ namespace SashaRX.PrefabDoctor
                 var root = scope.prefabContentsRoot;
                 if (root == null) return 0;
 
+                // Pre-clean missing scripts so the scope's Dispose can save
+                // the file. Prefabs with missing scripts cause Unity to abort
+                // SaveAsPrefabAsset — stripping them first unblocks both the
+                // LOD normalisation AND the subsequent re-save.
+                RemoveMissingScriptsRecursive(root.transform, ref writes);
+
                 var groups = root.GetComponentsInChildren<LODGroup>(true);
-                if (groups == null || groups.Length == 0) return 0;
+                if (groups == null || groups.Length == 0) return writes;
 
                 foreach (var group in groups)
                 {
@@ -712,6 +722,10 @@ namespace SashaRX.PrefabDoctor
                 using var scope = new PrefabUtility.EditPrefabContentsScope(prefabPath);
                 var root = scope.prefabContentsRoot;
                 if (root == null) return 0;
+
+                // Pre-clean missing scripts so Dispose can save.
+                int dummy = 0;
+                RemoveMissingScriptsRecursive(root.transform, ref dummy);
 
                 var instances = new List<GameObject>();
                 if (PrefabUtility.IsAnyPrefabInstanceRoot(root))
