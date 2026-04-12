@@ -1104,7 +1104,10 @@ namespace SashaRX.PrefabDoctor
             _healthDetailContainer.style.display = DisplayStyle.None;
 
             _healthDetailLabel = new Label("Select an asset from the Health section.");
-            _healthDetailLabel.style.padding = new StyleLength(8);
+            _healthDetailLabel.style.paddingTop = 8;
+            _healthDetailLabel.style.paddingBottom = 8;
+            _healthDetailLabel.style.paddingLeft = 8;
+            _healthDetailLabel.style.paddingRight = 8;
             _healthDetailLabel.style.whiteSpace = WhiteSpace.Normal;
             _healthDetailLabel.style.color = new Color(0.85f, 0.85f, 0.85f);
             _healthDetailContainer.Add(_healthDetailLabel);
