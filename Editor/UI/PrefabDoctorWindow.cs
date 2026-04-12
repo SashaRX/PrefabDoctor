@@ -762,23 +762,42 @@ namespace SashaRX.PrefabDoctor
 
         private void BindGameObjectRow(VisualElement row, int index)
         {
-            var filtered = GetFilteredGameObjects();
-            if (index < 0 || index >= filtered.Count) return;
-            var goReport = filtered[index];
-
             var dot = row.Q<VisualElement>("dot");
             var nameLabel = row.Q<Label>("name");
             var countsLabel = row.Q<Label>("counts");
 
-            Color dotColor;
-            if (goReport.PingPongCount > 0) dotColor = new Color(1f, 0.3f, 0.3f);
-            else if (goReport.MultiOverrideCount > 0) dotColor = new Color(1f, 0.75f, 0.2f);
-            else if (goReport.OrphanCount > 0) dotColor = new Color(0.6f, 0.6f, 0.6f);
-            else dotColor = new Color(0.5f, 0.8f, 1f);
-            dot.style.backgroundColor = dotColor;
+            // Hierarchy mode: left panel shows PrefabTypeGroups
+            if (_report != null && _report.IsHierarchyMode && _prefabGroups != null)
+            {
+                if (index < 0 || index >= _prefabGroups.Count) return;
+                var group = _prefabGroups[index];
 
-            // Show last 2 path segments so instances in different locations
-            // are distinguishable (e.g. "Block_01/grass_01_1" vs "Block_02/grass_01_1").
+                Color dotColor;
+                if (group.PingPongCount > 0) dotColor = new Color(1f, 0.3f, 0.3f);
+                else if (group.MultiOverrideCount > 0) dotColor = new Color(1f, 0.75f, 0.2f);
+                else if (group.OrphanCount > 0) dotColor = new Color(0.6f, 0.6f, 0.6f);
+                else dotColor = new Color(0.5f, 0.8f, 1f);
+                dot.style.backgroundColor = dotColor;
+
+                nameLabel.text = $"{group.DisplayName} ({group.Instances.Count})";
+                nameLabel.tooltip = group.AssetPath;
+
+                countsLabel.text = $"{group.TotalConflicts} ovr";
+                return;
+            }
+
+            // Instance mode: left panel shows individual GameObjectReports
+            var filtered = GetFilteredGameObjects();
+            if (index < 0 || index >= filtered.Count) return;
+            var goReport = filtered[index];
+
+            Color goColor;
+            if (goReport.PingPongCount > 0) goColor = new Color(1f, 0.3f, 0.3f);
+            else if (goReport.MultiOverrideCount > 0) goColor = new Color(1f, 0.75f, 0.2f);
+            else if (goReport.OrphanCount > 0) goColor = new Color(0.6f, 0.6f, 0.6f);
+            else goColor = new Color(0.5f, 0.8f, 1f);
+            dot.style.backgroundColor = goColor;
+
             string path = goReport.RelativePath;
             int lastSlash = path.LastIndexOf('/');
             if (lastSlash > 0)
@@ -808,35 +827,28 @@ namespace SashaRX.PrefabDoctor
 
             RebuildConflictList();
 
-            if (_autoPing)
+            if (!_autoPing || idx < 0) return;
+
+            // Hierarchy mode: ping the source prefab asset
+            if (_report != null && _report.IsHierarchyMode
+                && _prefabGroups != null && idx < _prefabGroups.Count)
             {
-                var filtered = GetFilteredGameObjects();
-                if (idx >= 0 && idx < filtered.Count)
+                var group = _prefabGroups[idx];
+                var obj = AssetDatabase.LoadMainAssetAtPath(group.AssetPath);
+                if (obj != null)
                 {
-                    var goReport = filtered[idx];
-                    // Try direct path resolution first (works in instance mode).
-                    var sceneGO = ResolveByRelativePath(goReport.RelativePath);
-
-                    // Fallback for hierarchy mode: hierPath-prefixed paths
-                    // don't start with the root's name, so ResolveByRelativePath
-                    // fails. Use GoPathToInstanceRoot to get the PrefabInstance
-                    // root, which IS a valid scene object we can ping.
-                    if (sceneGO == null
-                        && _report != null
-                        && _report.GoPathToInstanceRoot != null
-                        && _report.GoPathToInstanceRoot.TryGetValue(
-                            goReport.RelativePath, out var instanceRoot)
-                        && instanceRoot != null)
-                    {
-                        sceneGO = instanceRoot;
-                    }
-
-                    if (sceneGO != null)
-                    {
-                        EditorGUIUtility.PingObject(sceneGO);
-                        Selection.activeGameObject = sceneGO;
-                    }
+                    EditorGUIUtility.PingObject(obj);
+                    Selection.activeObject = obj;
                 }
+                return;
+            }
+
+            // Instance mode: ping the scene object
+            var filtered = GetFilteredGameObjects();
+            if (idx < filtered.Count)
+            {
+                var goReport = filtered[idx];
+                PingSceneObject(goReport.RelativePath);
             }
         }
 
@@ -844,13 +856,23 @@ namespace SashaRX.PrefabDoctor
         {
             if (_gameObjectListView == null) return;
 
-            var filtered = GetFilteredGameObjects();
-            _gameObjectListView.itemsSource = filtered;
+            // Hierarchy mode: show PrefabTypeGroups
+            if (_report != null && _report.IsHierarchyMode)
+            {
+                BuildPrefabGroups();
+                _gameObjectListView.itemsSource = _prefabGroups;
+            }
+            else
+            {
+                _prefabGroups = null;
+                var filtered = GetFilteredGameObjects();
+                _gameObjectListView.itemsSource = filtered;
+            }
+
             _gameObjectListView.RefreshItems();
 
-            // Clamp & push selection without firing selectionChanged (which
-            // would re-ping the scene every time).
-            if (_selectedGoIndex >= filtered.Count) _selectedGoIndex = -1;
+            int count = (_gameObjectListView.itemsSource as System.Collections.IList)?.Count ?? 0;
+            if (_selectedGoIndex >= count) _selectedGoIndex = -1;
             _muteGoListSync = true;
             try
             {
@@ -858,6 +880,72 @@ namespace SashaRX.PrefabDoctor
                     _selectedGoIndex >= 0 ? new[] { _selectedGoIndex } : System.Array.Empty<int>());
             }
             finally { _muteGoListSync = false; }
+        }
+
+        /// <summary>
+        /// Build PrefabTypeGroups from the hierarchy analysis report.
+        /// Groups GameObjectReports by their source prefab asset path.
+        /// </summary>
+        private void BuildPrefabGroups()
+        {
+            _prefabGroups = new List<PrefabTypeGroup>();
+            if (_report?.AssetToInstances == null) return;
+
+            foreach (var kvp in _report.AssetToInstances)
+            {
+                string assetPath = kvp.Key;
+                var instances = kvp.Value;
+
+                var group = new PrefabTypeGroup
+                {
+                    AssetPath = assetPath,
+                    DisplayName = System.IO.Path.GetFileNameWithoutExtension(assetPath),
+                    Instances = instances
+                };
+
+                // Collect all GameObjectReports belonging to instances of this prefab
+                foreach (var goReport in _report.GameObjects)
+                {
+                    if (_report.GoPathToInstanceRoot != null
+                        && _report.GoPathToInstanceRoot.TryGetValue(
+                            goReport.RelativePath, out var instRoot)
+                        && instances.Contains(instRoot))
+                    {
+                        // Check if any conflicts pass the current filter
+                        bool hasMatchingConflicts = false;
+                        foreach (var c in goReport.Conflicts)
+                        {
+                            if (PassesFilter(c))
+                            {
+                                hasMatchingConflicts = true;
+                                break;
+                            }
+                        }
+                        if (!hasMatchingConflicts) continue;
+
+                        group.ChildReports.Add(goReport);
+                        group.TotalConflicts += goReport.Conflicts.Count;
+                        group.PingPongCount += goReport.PingPongCount;
+                        group.MultiOverrideCount += goReport.MultiOverrideCount;
+                        group.OrphanCount += goReport.OrphanCount;
+                        group.InsignificantCount += goReport.InsignificantCount;
+                    }
+                }
+
+                if (group.ChildReports.Count > 0)
+                    _prefabGroups.Add(group);
+            }
+
+            // Sort: worst first
+            _prefabGroups.Sort(static (a, b) =>
+            {
+                int c = b.PingPongCount.CompareTo(a.PingPongCount);
+                if (c != 0) return c;
+                c = b.MultiOverrideCount.CompareTo(a.MultiOverrideCount);
+                if (c != 0) return c;
+                c = b.TotalConflicts.CompareTo(a.TotalConflicts);
+                return c != 0 ? c : string.Compare(a.DisplayName, b.DisplayName, StringComparison.Ordinal);
+            });
         }
 
         // ── Empty state (UI Toolkit) ───────────────────────────────
@@ -984,7 +1072,7 @@ namespace SashaRX.PrefabDoctor
             compCol.bindCell = BindCompCell;
             columns.Add(compCol);
 
-            var pathCol = new Column { name = "path", title = "Object", stretchable = false };
+            var pathCol = new Column { name = "path", title = "Instance", stretchable = false };
             pathCol.width = 160f;
             pathCol.makeCell = MakeLabelCell;
             pathCol.bindCell = BindPathCell;
@@ -1104,13 +1192,28 @@ namespace SashaRX.PrefabDoctor
             if (index < 0 || index >= _conflictRows.Count) { lbl.text = ""; return; }
             var row = _conflictRows[index];
             lbl.userData = index;
-            // Show last segment of the GO path within the selected report entry
-            // so the user can distinguish which child has this override.
-            string goPath = row.Conflict.Key.GameObjectPath;
-            int slash = goPath.LastIndexOf('/');
-            lbl.text = slash >= 0 ? goPath[(slash + 1)..] : goPath;
-            lbl.tooltip = goPath;
-            lbl.style.color = new Color(0.7f, 0.8f, 0.9f);
+
+            string goPath = row.GoReport.RelativePath;
+
+            // In hierarchy mode, show the instance root name so the user
+            // can see WHICH scene instance this override belongs to.
+            if (_report != null && _report.IsHierarchyMode
+                && _report.GoPathToInstanceRoot != null
+                && _report.GoPathToInstanceRoot.TryGetValue(goPath, out var instRoot)
+                && instRoot != null)
+            {
+                lbl.text = instRoot.name;
+                lbl.tooltip = goPath;
+                lbl.style.color = new Color(0.6f, 0.85f, 1f);
+            }
+            else
+            {
+                // Instance mode: show child object name
+                int slash = goPath.LastIndexOf('/');
+                lbl.text = slash >= 0 ? goPath[(slash + 1)..] : goPath;
+                lbl.tooltip = goPath;
+                lbl.style.color = new Color(0.7f, 0.8f, 0.9f);
+            }
             lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
         }
 
@@ -1206,10 +1309,24 @@ namespace SashaRX.PrefabDoctor
                 return;
             }
 
+            // Hierarchy mode: show prefab type + instance count
+            if (_report.IsHierarchyMode && _prefabGroups != null
+                && _selectedGoIndex < _prefabGroups.Count)
+            {
+                var group = _prefabGroups[_selectedGoIndex];
+                _conflictHeaderLabel.text =
+                    $"{group.DisplayName} — {group.Instances.Count} instances · "
+                    + $"{_conflictRows.Count} overrides";
+                _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+                _conflictHeaderLabel.style.color = new Color(0.9f, 0.9f, 0.9f);
+                _conflictHeaderPingButton.style.display = DisplayStyle.Flex;
+                return;
+            }
+
             var filtered = GetFilteredGameObjects();
             if (_selectedGoIndex >= filtered.Count)
             {
-                _conflictHeaderLabel.text = "(GameObject out of range)";
+                _conflictHeaderLabel.text = "(out of range)";
                 _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Italic;
                 _conflictHeaderLabel.style.color = new Color(0.6f, 0.6f, 0.6f);
                 _conflictHeaderPingButton.style.display = DisplayStyle.None;
@@ -1313,20 +1430,43 @@ namespace SashaRX.PrefabDoctor
 
             if (_report != null && _selectedGoIndex >= 0)
             {
-                var filteredGOs = GetFilteredGameObjects();
-                if (_selectedGoIndex < filteredGOs.Count)
+                // Hierarchy mode: selected item is a PrefabTypeGroup —
+                // show ALL conflicts from all instances of that prefab type.
+                if (_report.IsHierarchyMode && _prefabGroups != null
+                    && _selectedGoIndex < _prefabGroups.Count)
                 {
-                    var goReport = filteredGOs[_selectedGoIndex];
-                    int canonicalGoIndex = GetCanonicalGoIndex(goReport);
-                    if (canonicalGoIndex >= 0)
+                    var group = _prefabGroups[_selectedGoIndex];
+                    foreach (var goReport in group.ChildReports)
                     {
-                        var conflicts = goReport.Conflicts;
-                        for (int i = 0; i < conflicts.Count; i++)
+                        int canonicalGoIndex = GetCanonicalGoIndex(goReport);
+                        if (canonicalGoIndex < 0) continue;
+
+                        for (int i = 0; i < goReport.Conflicts.Count; i++)
                         {
-                            var c = conflicts[i];
+                            var c = goReport.Conflicts[i];
                             if (!PassesFilter(c)) continue;
                             _conflictRows.Add(new ConflictRow(
                                 new ConflictHandle(canonicalGoIndex, i), c, goReport));
+                        }
+                    }
+                }
+                // Instance mode: selected item is a single GameObjectReport.
+                else
+                {
+                    var filteredGOs = GetFilteredGameObjects();
+                    if (_selectedGoIndex < filteredGOs.Count)
+                    {
+                        var goReport = filteredGOs[_selectedGoIndex];
+                        int canonicalGoIndex = GetCanonicalGoIndex(goReport);
+                        if (canonicalGoIndex >= 0)
+                        {
+                            for (int i = 0; i < goReport.Conflicts.Count; i++)
+                            {
+                                var c = goReport.Conflicts[i];
+                                if (!PassesFilter(c)) continue;
+                                _conflictRows.Add(new ConflictRow(
+                                    new ConflictHandle(canonicalGoIndex, i), c, goReport));
+                            }
                         }
                     }
                 }
