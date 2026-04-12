@@ -411,14 +411,11 @@ namespace SashaRX.PrefabDoctor
             toolbar.Add(new ToolbarSpacer());
 
             var analyzeButton = new ToolbarButton(RunAnalysis) { text = "Analyze" };
-            analyzeButton.style.color = new Color(0.5f, 0.9f, 0.5f);
+            analyzeButton.AddToClassList("pd-btn-analyze");
             toolbar.Add(analyzeButton);
 
-            var hierarchyButton = new ToolbarButton(RunHierarchyAnalysis)
-            {
-                text = "▼ Hierarchy"
-            };
-            hierarchyButton.style.color = new Color(0.45f, 0.7f, 1f);
+            var hierarchyButton = new ToolbarButton(RunHierarchyAnalysis) { text = "▼ Hierarchy" };
+            hierarchyButton.AddToClassList("pd-btn-hierarchy");
             toolbar.Add(hierarchyButton);
 
             toolbar.Add(new ToolbarSpacer());
@@ -557,23 +554,10 @@ namespace SashaRX.PrefabDoctor
         private VisualElement BuildStatusBar()
         {
             var bar = new VisualElement();
-            bar.style.flexDirection = FlexDirection.Row;
-            bar.style.alignItems = Align.Center;
-            bar.style.flexShrink = 0;
-            bar.style.paddingLeft = 6;
-            bar.style.paddingRight = 6;
-            bar.style.paddingTop = 2;
-            bar.style.paddingBottom = 2;
-            bar.style.borderBottomWidth = 1;
-            bar.style.borderBottomColor = new Color(0f, 0f, 0f, 0.35f);
-            bar.style.backgroundColor = new Color(0.16f, 0.16f, 0.16f, 0.45f);
+            bar.AddToClassList("pd-status-bar");
 
             _statusChainLabel = new Label("(no report)");
-            _statusChainLabel.style.unityFontStyleAndWeight = FontStyle.Normal;
-            _statusChainLabel.style.flexGrow = 1;
-            _statusChainLabel.style.color = new Color(0.75f, 0.75f, 0.75f);
-            _statusChainLabel.style.overflow = Overflow.Hidden;
-            _statusChainLabel.style.textOverflow = TextOverflow.Ellipsis;
+            _statusChainLabel.AddToClassList("pd-status-chain");
             bar.Add(_statusChainLabel);
 
             _statusPpLabel = MakeBadgeLabel();
@@ -601,9 +585,7 @@ namespace SashaRX.PrefabDoctor
             bar.Add(_statusOtherLabel);
 
             _statusElapsedLabel = new Label("");
-            _statusElapsedLabel.style.marginLeft = 8;
-            _statusElapsedLabel.style.color = new Color(0.6f, 0.6f, 0.6f);
-            _statusElapsedLabel.style.unityFontStyleAndWeight = FontStyle.Italic;
+            _statusElapsedLabel.AddToClassList("pd-status-elapsed");
             bar.Add(_statusElapsedLabel);
 
             return bar;
@@ -611,15 +593,8 @@ namespace SashaRX.PrefabDoctor
 
         private static Label MakeBadgeLabel()
         {
-            var lbl = new Label
-            {
-                style =
-                {
-                    marginLeft = 4,
-                    marginRight = 4,
-                    unityFontStyleAndWeight = FontStyle.Bold
-                }
-            };
+            var lbl = new Label();
+            lbl.AddToClassList("pd-badge");
             return lbl;
         }
 
@@ -746,36 +721,21 @@ namespace SashaRX.PrefabDoctor
         private VisualElement MakeGameObjectRow()
         {
             var row = new VisualElement();
-            row.style.flexDirection = FlexDirection.Row;
-            row.style.alignItems = Align.Center;
-            row.style.paddingLeft = 4;
-            row.style.paddingRight = 4;
+            row.AddToClassList("pd-go-row");
 
             var dot = new VisualElement();
             dot.name = "dot";
-            dot.style.width = 10;
-            dot.style.height = 10;
-            dot.style.marginRight = 6;
-            dot.style.borderTopLeftRadius = 5;
-            dot.style.borderTopRightRadius = 5;
-            dot.style.borderBottomLeftRadius = 5;
-            dot.style.borderBottomRightRadius = 5;
-            dot.style.flexShrink = 0;
+            dot.AddToClassList("pd-go-dot");
             row.Add(dot);
 
             var name = new Label();
             name.name = "name";
-            name.style.flexGrow = 1;
-            name.style.overflow = Overflow.Hidden;
-            name.style.textOverflow = TextOverflow.Ellipsis;
-            name.style.whiteSpace = WhiteSpace.NoWrap;
+            name.AddToClassList("pd-go-name");
             row.Add(name);
 
             var counts = new Label();
             counts.name = "counts";
-            counts.style.marginLeft = 4;
-            counts.style.color = new Color(0.65f, 0.65f, 0.65f);
-            counts.style.flexShrink = 0;
+            counts.AddToClassList("pd-go-counts");
             row.Add(counts);
 
             return row;
@@ -877,15 +837,10 @@ namespace SashaRX.PrefabDoctor
         private VisualElement BuildEmptyState()
         {
             var root = new VisualElement();
-            root.style.flexGrow = 1;
-            root.style.alignItems = Align.Center;
-            root.style.justifyContent = Justify.Center;
+            root.AddToClassList("pd-empty-state");
 
             _emptyStateLabel = new Label("Click Analyze to begin.");
-            _emptyStateLabel.style.color = new Color(0.6f, 0.6f, 0.6f);
-            _emptyStateLabel.style.unityTextAlign = TextAnchor.MiddleCenter;
-            _emptyStateLabel.style.whiteSpace = WhiteSpace.Normal;
-            _emptyStateLabel.style.maxWidth = 360;
+            _emptyStateLabel.AddToClassList("pd-empty-label");
             root.Add(_emptyStateLabel);
 
             _emptyStateProgress = new ProgressBar
@@ -1135,20 +1090,10 @@ namespace SashaRX.PrefabDoctor
         private VisualElement BuildConflictHeader()
         {
             var header = new VisualElement();
-            header.style.flexDirection = FlexDirection.Row;
-            header.style.alignItems = Align.Center;
-            header.style.flexShrink = 0;
-            header.style.paddingLeft = 6;
-            header.style.paddingRight = 6;
-            header.style.paddingTop = 4;
-            header.style.paddingBottom = 4;
+            header.AddToClassList("pd-conflict-header");
 
             _conflictHeaderLabel = new Label();
-            _conflictHeaderLabel.style.flexGrow = 1;
-            _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
-            _conflictHeaderLabel.style.overflow = Overflow.Hidden;
-            _conflictHeaderLabel.style.textOverflow = TextOverflow.Ellipsis;
-            _conflictHeaderLabel.style.whiteSpace = WhiteSpace.NoWrap;
+            _conflictHeaderLabel.AddToClassList("pd-conflict-header-label");
             header.Add(_conflictHeaderLabel);
 
             _conflictHeaderPingButton = new Button(OnHeaderPingClicked) { text = "Ping" };
@@ -1207,21 +1152,10 @@ namespace SashaRX.PrefabDoctor
         private VisualElement BuildBatchBar()
         {
             var bar = new VisualElement();
-            bar.style.flexDirection = FlexDirection.Row;
-            bar.style.alignItems = Align.Center;
-            bar.style.flexShrink = 0;
-            bar.style.paddingLeft = 4;
-            bar.style.paddingRight = 4;
-            bar.style.paddingTop = 2;
-            bar.style.paddingBottom = 2;
-            bar.style.borderBottomWidth = 1;
-            bar.style.borderBottomColor = new Color(0f, 0f, 0f, 0.3f);
-            bar.style.backgroundColor = new Color(0.16f, 0.16f, 0.16f, 0.35f);
+            bar.AddToClassList("pd-batch-bar");
 
             _batchCountLabel = new Label("0 selected");
-            _batchCountLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
-            _batchCountLabel.style.marginRight = 8;
-            _batchCountLabel.style.minWidth = 180;
+            _batchCountLabel.AddToClassList("pd-batch-count");
             bar.Add(_batchCountLabel);
 
             // Scope: current GameObject's visible rows only.
@@ -1236,7 +1170,7 @@ namespace SashaRX.PrefabDoctor
             selectAllMatching.tooltip = "Select every conflict in the entire "
                 + "report that matches the current filter. Use with "
                 + "LightmapOnly / NetworkNoiseOnly / GarbageOnly for Level-wide cleanups.";
-            selectAllMatching.style.color = new Color(0.55f, 0.85f, 1f);
+            selectAllMatching.AddToClassList("pd-btn-select-all-matching");
             bar.Add(selectAllMatching);
 
             var selectNone = new Button(SelectNone) { text = "Select None" };
@@ -1250,7 +1184,7 @@ namespace SashaRX.PrefabDoctor
             revert.tooltip = "Revert every selected conflict (cross-GameObject). "
                 + "Hierarchy mode pins each conflict to its own nested "
                 + "PrefabInstance owner. One Undo group for the whole batch.";
-            revert.style.color = new Color(1f, 0.85f, 0.55f);
+            revert.AddToClassList("pd-btn-revert");
             bar.Add(revert);
 
             var copy = new Button(CopySelectedPropertyPaths) { text = "Copy Paths" };

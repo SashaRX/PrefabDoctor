@@ -121,25 +121,7 @@ namespace SashaRX.PrefabDoctor
             RefreshVisibility();
         }
 
-        public void OnGUILegacy()
-        {
-            DrawScanToolbar();
-            DrawScanStatusBar();
-
-            if (_scanJob != null)
-            {
-                DrawProgressBar();
-                return;
-            }
-
-            if (_report == null || !_report.IsComplete)
-            {
-                DrawEmptyScanState();
-                return;
-            }
-
-            DrawResultsTable();
-        }
+        // OnGUI removed — BuildRoot() is the UI Toolkit replacement.
 
         public void PumpScanJob()
         {
@@ -424,99 +406,7 @@ namespace SashaRX.PrefabDoctor
             RefreshVisibility();
         }
 
-        // ── IMGUI (legacy, kept for reference) ───────────────────
-
-        // ── Toolbar ────────────────────────────────────────────────
-
-        private void DrawScanToolbar()
-        {
-            EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
-
-            // Folder scope
-            if (GUILayout.Button(_folderScope ?? "Entire Project",
-                    EditorStyles.toolbarDropDown, GUILayout.Width(160)))
-            {
-                var menu = new GenericMenu();
-                menu.AddItem(new GUIContent("Entire Project"), _folderScope == null, () =>
-                    _folderScope = null);
-                menu.AddSeparator("");
-                menu.AddItem(new GUIContent("Pick Folder..."), false, () =>
-                {
-                    string path = EditorUtility.OpenFolderPanel("Scan Folder", "Assets", "");
-                    if (!string.IsNullOrEmpty(path))
-                    {
-                        // Convert to project-relative
-                        if (path.StartsWith(Application.dataPath))
-                            path = "Assets" + path[Application.dataPath.Length..];
-                        _folderScope = path;
-                    }
-                });
-                menu.ShowAsContext();
-            }
-
-            GUILayout.Space(4);
-
-            // Scan button
-            GUI.backgroundColor = new Color(0.4f, 0.7f, 1f);
-            if (GUILayout.Button("Scan Project", EditorStyles.toolbarButton, GUILayout.Width(90)))
-                RunScan();
-            GUI.backgroundColor = Color.white;
-
-            GUILayout.Space(8);
-
-            // Filter
-            _filterMode = (ScanFilterMode)EditorGUILayout.EnumPopup(_filterMode,
-                EditorStyles.toolbarDropDown, GUILayout.Width(120));
-
-            GUILayout.FlexibleSpace();
-
-            // Toggles
-            _auditFbx = GUILayout.Toggle(_auditFbx, "FBX Audit",
-                EditorStyles.toolbarButton, GUILayout.Width(65));
-            _checkMaterials = GUILayout.Toggle(_checkMaterials, "Materials",
-                EditorStyles.toolbarButton, GUILayout.Width(60));
-
-            GUILayout.Space(4);
-
-            // Batch actions
-            if (_report != null && _report.IsComplete)
-            {
-                if (_selected.Count > 0 && GUILayout.Button(
-                        $"Batch ({_selected.Count})", EditorStyles.toolbarDropDown,
-                        GUILayout.Width(80)))
-                {
-                    ShowBatchMenu();
-                }
-            }
-
-            // Deep bulk cleanup — works on every .prefab in the current
-            // folder scope, with or without a prior scan. This is the
-            // "just clean my whole project" button users reach for after
-            // Unity's Hierarchy right-click Remove Unused Overrides leaves
-            // deep nested orphans behind.
-            GUI.backgroundColor = new Color(1f, 0.75f, 0.3f);
-            if (GUILayout.Button("Clean All Unused", EditorStyles.toolbarButton,
-                    GUILayout.Width(120)))
-            {
-                DoCleanAllUnused();
-            }
-            GUI.backgroundColor = Color.white;
-
-            // Canonical LOD lightmap scale cascade: write 0.5^lodIndex into
-            // every prefab with a LODGroup, then strip stale
-            // m_ScaleInLightmap mods from intermediate variants so the
-            // leaf value is what propagates to scenes. See Task 9 in the
-            // plan file for the full rationale.
-            GUI.backgroundColor = new Color(0.3f, 0.85f, 0.85f);
-            if (GUILayout.Button("Fix LOD Lightmap Scale", EditorStyles.toolbarButton,
-                    GUILayout.Width(150)))
-            {
-                DoNormaliseLodLightmapScale();
-            }
-            GUI.backgroundColor = Color.white;
-
-            EditorGUILayout.EndHorizontal();
-        }
+        // ── Business logic (shared) ───────────────────────────────
 
         private void DoNormaliseLodLightmapScale()
         {
@@ -660,7 +550,8 @@ namespace SashaRX.PrefabDoctor
                 RunScan();
         }
 
-        // ── Status bar ─────────────────────────────────────────────
+        // ── Legacy IMGUI (dead code, not called) ─────────────────
+        // Kept temporarily for reference. Safe to delete.
 
         private void DrawScanStatusBar()
         {
