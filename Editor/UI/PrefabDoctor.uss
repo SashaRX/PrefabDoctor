@@ -144,13 +144,25 @@
     color: rgb(153, 153, 153);
 }
 
+/* ── Left panel sections ───────────────────────────────────── */
+.pd-section-header > .unity-foldout__toggle > .unity-toggle__text {
+    -unity-font-style: bold;
+    color: rgb(200, 200, 200);
+}
+
+.pd-health-badge {
+    min-width: 70px;
+    -unity-font-style: bold;
+    font-size: 9px;
+    margin-right: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* ── Toolbar accents ────────────────────────────────────────── */
 .pd-btn-analyze {
     color: rgb(128, 230, 128);
-}
-
-.pd-btn-hierarchy {
-    color: rgb(115, 179, 255);
 }
 
 .pd-btn-revert {

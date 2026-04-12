@@ -163,5 +163,12 @@ namespace SashaRX.PrefabDoctor
         /// expensive and fragile <c>ResolveByRelativePath</c> path walk.
         /// </summary>
         public Dictionary<string, GameObject> GoPathToInstanceRoot;
+
+        /// <summary>
+        /// Unique prefab asset paths discovered during analysis (from chain
+        /// NestingLevels). Populated in both instance and hierarchy modes.
+        /// Used to scope the dependency health scan to relevant assets only.
+        /// </summary>
+        public HashSet<string> DependentAssetPaths = new();
     }
 }

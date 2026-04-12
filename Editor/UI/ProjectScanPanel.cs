@@ -60,6 +60,7 @@ namespace SashaRX.PrefabDoctor
         // ── Public interface ───────────────────────────────────────
 
         public bool IsScanning => _scanJob != null;
+        public ProjectScanReport Report => _report;
 
         public VisualElement BuildRoot()
         {
@@ -309,23 +310,25 @@ namespace SashaRX.PrefabDoctor
             return btn;
         }
 
+        internal static string CategoryLabel(PrefabHealthCategory cat) => cat switch
+        {
+            PrefabHealthCategory.Broken => "BROKEN",
+            PrefabHealthCategory.MissingScripts => "Missing Scripts",
+            PrefabHealthCategory.FbxWithoutWrapper => "FBX (no wrap)",
+            PrefabHealthCategory.FbxHasWrapper => "FBX (has wrap)",
+            PrefabHealthCategory.BrokenReferences => "Broken Refs",
+            PrefabHealthCategory.BadMaterials => "Bad Materials",
+            PrefabHealthCategory.UnusedOverrides => "Unused Ovr",
+            PrefabHealthCategory.FbxImportNoise => "FBX Import",
+            _ => "?"
+        };
+
         private void BindCatCell(VisualElement el, int idx)
         {
             var lbl = (Label)el;
             if (idx < 0 || _filteredCache == null || idx >= _filteredCache.Count) { lbl.text = ""; return; }
             var r = _filteredCache[idx]; lbl.userData = idx;
-            lbl.text = r.PrimaryCategory switch
-            {
-                PrefabHealthCategory.Broken => "BROKEN",
-                PrefabHealthCategory.MissingScripts => "Missing Scripts",
-                PrefabHealthCategory.FbxWithoutWrapper => "FBX (no wrap)",
-                PrefabHealthCategory.FbxHasWrapper => "FBX (has wrap)",
-                PrefabHealthCategory.BrokenReferences => "Broken Refs",
-                PrefabHealthCategory.BadMaterials => "Bad Materials",
-                PrefabHealthCategory.UnusedOverrides => "Unused Ovr",
-                PrefabHealthCategory.FbxImportNoise => "FBX Import",
-                _ => "?"
-            };
+            lbl.text = CategoryLabel(r.PrimaryCategory);
         }
 
         private Label MakePrefabCell()
@@ -945,7 +948,7 @@ namespace SashaRX.PrefabDoctor
             };
         }
 
-        private static string BuildDetailsString(PrefabScanResult r)
+        internal static string BuildDetailsString(PrefabScanResult r)
         {
             var parts = new List<string>();
 

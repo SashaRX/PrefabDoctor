@@ -132,6 +132,63 @@ namespace SashaRX.PrefabDoctor
             yield return 1f;
         }
 
+        // ── Subset scan (dependency health) ───────────────────────
+
+        /// <summary>
+        /// Scan a specific list of prefab asset paths (e.g. dependencies
+        /// discovered during hierarchy analysis). Yields progress [0..1].
+        /// </summary>
+        public IEnumerator<float> ScanAssetsIncremental(
+            IReadOnlyCollection<string> assetPaths,
+            ProjectScanReport report,
+            int batchSize = 20)
+        {
+            var sw = Stopwatch.StartNew();
+            report.ScanScope = $"{assetPaths.Count} dependent assets";
+            report.TotalPrefabs = assetPaths.Count;
+
+            // Convert paths to GUIDs for the FBX index builder.
+            var guids = new List<string>();
+            foreach (var path in assetPaths)
+            {
+                string guid = AssetDatabase.AssetPathToGUID(path);
+                if (!string.IsNullOrEmpty(guid))
+                    guids.Add(guid);
+            }
+
+            var fbxIndex = BuildFbxWrapperIndex(guids.ToArray());
+            report.FbxToWrappersIndex = fbxIndex;
+
+            yield return 0.1f;
+
+            int i = 0;
+            foreach (var path in assetPaths)
+            {
+                var result = AnalyzePrefab(path, fbxIndex);
+                if (result != null)
+                {
+                    report.Results.Add(result);
+                    TallyCategory(report, result);
+                }
+
+                i++;
+                if (i % batchSize == 0)
+                    yield return 0.1f + 0.9f * ((float)i / assetPaths.Count);
+            }
+
+            report.Results.Sort((a, b) =>
+            {
+                int catA = CategorySeverity(a.PrimaryCategory);
+                int catB = CategorySeverity(b.PrimaryCategory);
+                if (catA != catB) return catB.CompareTo(catA);
+                return b.OverrideCount.CompareTo(a.OverrideCount);
+            });
+
+            report.IsComplete = true;
+            report.ScanTimeMs = sw.ElapsedMilliseconds;
+            yield return 1f;
+        }
+
         // ── FBX → Wrapper Index ────────────────────────────────────
 
         /// <summary>

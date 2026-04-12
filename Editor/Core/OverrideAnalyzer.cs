@@ -478,6 +478,12 @@ namespace SashaRX.PrefabDoctor
             try
             {
                 report.Chain = BuildChain(root);
+
+                // Collect dependent asset paths for the health scan.
+                foreach (var level in report.Chain)
+                    if (!string.IsNullOrEmpty(level.AssetPath))
+                        report.DependentAssetPaths.Add(level.AssetPath);
+
                 if (report.Chain.Count < 2)
                 {
                     report.IsComplete = true;
@@ -611,6 +617,12 @@ namespace SashaRX.PrefabDoctor
                 report.HierarchyInstanceRoots.Add(instanceRoot);
 
                 var chain = BuildChainCached(instanceRoot, chainTemplateCache);
+
+                // Collect dependent asset paths for the health scan.
+                foreach (var level in chain)
+                    if (!string.IsNullOrEmpty(level.AssetPath))
+                        report.DependentAssetPaths.Add(level.AssetPath);
+
                 if (chain.Count >= 2)
                 {
                     float progress = (float)idx / total;
@@ -749,6 +761,11 @@ namespace SashaRX.PrefabDoctor
             BeginRun();
             report.AnalyzedRoot = root;
             report.Chain = BuildChain(root);
+
+            // Collect dependent asset paths for the health scan.
+            foreach (var level in report.Chain)
+                if (!string.IsNullOrEmpty(level.AssetPath))
+                    report.DependentAssetPaths.Add(level.AssetPath);
 
             if (report.Chain.Count < 2)
             {
