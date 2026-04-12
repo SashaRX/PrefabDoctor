@@ -389,35 +389,39 @@ namespace SashaRX.PrefabDoctor
 
         private void CheckUnusedOverrides(GameObject prefab, PrefabScanResult result)
         {
-            // Unused overrides = overrides where property path no longer exists
-            // on the target object (field renamed, SerializeReference removed, etc.)
-            // For full detection we'd need SerializedObject per component —
-            // expensive. Use lightweight heuristic: null target = broken ref (above),
-            // but also check for common patterns.
             var mods = PrefabUtility.GetPropertyModifications(prefab);
             if (mods == null) return;
 
             int unused = 0;
-            foreach (var mod in mods)
+            // Cache SerializedObjects by target to avoid repeated creation and
+            // ensure proper disposal — each SO holds a native handle.
+            var soCache = new Dictionary<Object, SerializedObject>();
+            try
             {
-                if (mod.target == null) continue; // already counted as broken ref
-                if (PrefabUtility.IsDefaultOverride(mod)) continue;
-
-                // Try to verify property exists on target
-                try
+                foreach (var mod in mods)
                 {
-                    var so = new SerializedObject(mod.target);
-                    var prop = so.FindProperty(mod.propertyPath);
-                    if (prop == null)
+                    if (mod.target == null) continue; // already counted as broken ref
+                    if (PrefabUtility.IsDefaultOverride(mod)) continue;
+
+                    try
+                    {
+                        if (!soCache.TryGetValue(mod.target, out var so))
+                        {
+                            so = new SerializedObject(mod.target);
+                            soCache[mod.target] = so;
+                        }
+                        if (so.FindProperty(mod.propertyPath) == null)
+                            unused++;
+                    }
+                    catch
                     {
                         unused++;
                     }
                 }
-                catch
-                {
-                    // SerializedObject creation can fail for destroyed objects
-                    unused++;
-                }
+            }
+            finally
+            {
+                foreach (var so in soCache.Values) so?.Dispose();
             }
 
             if (unused > 0)

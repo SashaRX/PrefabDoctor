@@ -389,6 +389,7 @@ namespace SashaRX.PrefabDoctor
                         if (_filterMode == captured) return;
                         _filterMode = captured;
                         _filterMenu.text = FilterModeLabel(captured);
+                        _selectedConflicts.Clear();
                         RefreshLeftPanel();
                         RebuildConflictList();
                     },
@@ -1877,27 +1878,38 @@ namespace SashaRX.PrefabDoctor
             }
 
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 16)
+            try
             {
-                if (!_depScanJob.MoveNext())
+                while (sw.ElapsedMilliseconds < 16)
                 {
-                    _healthReport = _pendingDepReport;
-                    _depScanJob = null;
-                    _pendingDepReport = null;
-                    EditorApplication.update -= PumpDependencyScanJob;
-
-                    if (_healthReport != null && _healthReport.Results.Count > 0)
+                    if (!_depScanJob.MoveNext())
                     {
-                        Debug.Log($"[Prefab Doctor] Dependency scan: "
-                            + $"{_healthReport.Results.Count} issues found "
-                            + $"in {_healthReport.TotalPrefabs} dependent assets "
-                            + $"({_healthReport.ScanTimeMs:F0}ms)");
-                    }
+                        _healthReport = _pendingDepReport;
+                        _depScanJob = null;
+                        _pendingDepReport = null;
+                        EditorApplication.update -= PumpDependencyScanJob;
 
-                    RefreshHealthList();
-                    RefreshEmptyState();
-                    return;
+                        if (_healthReport != null && _healthReport.Results.Count > 0)
+                        {
+                            Debug.Log($"[Prefab Doctor] Dependency scan: "
+                                + $"{_healthReport.Results.Count} issues found "
+                                + $"in {_healthReport.TotalPrefabs} dependent assets "
+                                + $"({_healthReport.ScanTimeMs:F0}ms)");
+                        }
+
+                        RefreshHealthList();
+                        RefreshEmptyState();
+                        return;
+                    }
                 }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[Prefab Doctor] Dependency scan failed: {ex.Message}");
+                _depScanJob = null;
+                _pendingDepReport = null;
+                EditorApplication.update -= PumpDependencyScanJob;
+                RefreshEmptyState();
             }
         }
 
@@ -2169,27 +2181,38 @@ namespace SashaRX.PrefabDoctor
 
             // Process several steps per editor frame
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 16) // ~1 frame budget
+            try
             {
-                if (!_incrementalJob.MoveNext())
+                while (sw.ElapsedMilliseconds < 16) // ~1 frame budget
                 {
-                    // Done
-                    _report = _pendingReport;
-                    _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
-                    _selectedConflicts.Clear();
-                    _detailMode = _selectedGoIndex >= 0
-                        ? DetailMode.OverrideConflicts : DetailMode.None;
-                    _incrementalJob = null;
-                    _pendingReport = null;
-                    EditorApplication.update -= PumpIncrementalJob;
-                    RefreshAfterReportChange();
+                    if (!_incrementalJob.MoveNext())
+                    {
+                        // Done
+                        _report = _pendingReport;
+                        _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
+                        _selectedConflicts.Clear();
+                        _detailMode = _selectedGoIndex >= 0
+                            ? DetailMode.OverrideConflicts : DetailMode.None;
+                        _incrementalJob = null;
+                        _pendingReport = null;
+                        EditorApplication.update -= PumpIncrementalJob;
+                        RefreshAfterReportChange();
 
-                    // Phase 2: scan dependent assets
-                    if (_report.DependentAssetPaths.Count > 0)
-                        RunDependencyScan(_report.DependentAssetPaths);
-                    return;
+                        // Phase 2: scan dependent assets
+                        if (_report.DependentAssetPaths.Count > 0)
+                            RunDependencyScan(_report.DependentAssetPaths);
+                        return;
+                    }
+                    _progress = _incrementalJob.Current;
                 }
-                _progress = _incrementalJob.Current;
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[Prefab Doctor] Incremental analysis failed: {ex.Message}");
+                _incrementalJob = null;
+                _pendingReport = null;
+                EditorApplication.update -= PumpIncrementalJob;
+                _analyzer?.ClearSerializedObjectCache();
             }
             RefreshEmptyState();
         }

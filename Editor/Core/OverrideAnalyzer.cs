@@ -84,8 +84,16 @@ namespace SashaRX.PrefabDoctor
         private readonly Dictionary<int, (string componentType, string goPath, int targetId)>
             _keyBaseCache = new();
 
+        /// <summary>
+        /// Monotonically increasing run ID — incremented in BeginRun().
+        /// Incremental jobs capture this at start; if AbortRun() causes a
+        /// new BeginRun(), the old job detects the mismatch and yields break.
+        /// </summary>
+        private int _runId;
+
         private void BeginRun()
         {
+            _runId++;
             var settings = PrefabDoctorSettings.GetOrCreateDefault();
             var extra = settings?.AdditionalIgnoredPrefixes ?? Array.Empty<string>();
 
@@ -435,7 +443,19 @@ namespace SashaRX.PrefabDoctor
             if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
                 return;
 
-            if (IsIgnoredComponentType(mod.target.GetType().Name))
+            // Use the same _keyBaseCache as ProcessModFast to avoid
+            // GetType().Name (reflection) and GetRelativePath (transform walk)
+            // on every mod — all mods targeting the same component share
+            // the same key base.
+            int targetId = mod.target.GetInstanceID();
+            if (!_keyBaseCache.TryGetValue(targetId, out var keyBase))
+            {
+                string typeName = mod.target.GetType().Name;
+                keyBase = (typeName, GetRelativePath(mod.target), targetId);
+                _keyBaseCache[targetId] = keyBase;
+            }
+
+            if (IsIgnoredComponentType(keyBase.componentType))
                 return;
 
             if (subtreeRoot != null)
@@ -445,7 +465,13 @@ namespace SashaRX.PrefabDoctor
                     return;
             }
 
-            var key = MakeKey(mod);
+            var key = new PropertyKey
+            {
+                ComponentType = keyBase.componentType,
+                GameObjectPath = keyBase.goPath,
+                PropertyPath = mod.propertyPath,
+                TargetInstanceId = keyBase.targetId
+            };
             AddToMap(map, key, level, mod);
         }
 
@@ -481,7 +507,7 @@ namespace SashaRX.PrefabDoctor
 
                 // Collect dependent asset paths for the health scan.
                 foreach (var level in report.Chain)
-                    if (!string.IsNullOrEmpty(level.AssetPath))
+                    if (!string.IsNullOrEmpty(level.AssetPath) && !level.IsSceneInstance)
                         report.DependentAssetPaths.Add(level.AssetPath);
 
                 if (report.Chain.Count < 2)
@@ -514,10 +540,16 @@ namespace SashaRX.PrefabDoctor
                         AddConflictToReport(goReports, conflict, report);
                 }
 
-                report.GameObjects = goReports.Values
-                    .OrderByDescending(g => g.PingPongCount)
-                    .ThenByDescending(g => g.MultiOverrideCount)
-                    .ToList();
+                var goList = new List<GameObjectReport>(goReports.Values);
+                goList.Sort(static (a, b) =>
+                {
+                    int c = b.PingPongCount.CompareTo(a.PingPongCount);
+                    if (c != 0) return c;
+                    c = b.MultiOverrideCount.CompareTo(a.MultiOverrideCount);
+                    if (c != 0) return c;
+                    return b.InsignificantCount.CompareTo(a.InsignificantCount);
+                });
+                report.GameObjects = goList;
 
                 report.IsComplete = true;
             }
@@ -573,6 +605,7 @@ namespace SashaRX.PrefabDoctor
             report.IsHierarchyMode = true;
 
             BeginRun();
+            int myRunId = _runId;
 
             // Find all PrefabInstance roots recursively.
             var instanceRoots = new List<(GameObject go, string hierarchyPath)>();
@@ -620,7 +653,7 @@ namespace SashaRX.PrefabDoctor
 
                 // Collect dependent asset paths for the health scan.
                 foreach (var level in chain)
-                    if (!string.IsNullOrEmpty(level.AssetPath))
+                    if (!string.IsNullOrEmpty(level.AssetPath) && !level.IsSceneInstance)
                         report.DependentAssetPaths.Add(level.AssetPath);
 
                 if (chain.Count >= 2)
@@ -692,6 +725,9 @@ namespace SashaRX.PrefabDoctor
 
                 // Yield once per instance — the pump's 200ms budget
                 // decides how many instances fit into one tick.
+                // If a new run started (AbortRun + BeginRun), bail out
+                // so the old job doesn't access freed caches.
+                if (_runId != myRunId) yield break;
                 yield return total > 0 ? (float)(idx + 1) / total : 1f;
             }
 
@@ -759,6 +795,7 @@ namespace SashaRX.PrefabDoctor
         {
             var sw = Stopwatch.StartNew();
             BeginRun();
+            int myRunId = _runId;
             report.AnalyzedRoot = root;
             report.Chain = BuildChain(root);
 
@@ -795,7 +832,10 @@ namespace SashaRX.PrefabDoctor
 
                 processed++;
                 if (processed % batchSize == 0)
+                {
+                    if (_runId != myRunId) yield break;
                     yield return (float)processed / totalKeys;
+                }
             }
 
             foreach (var qg in quaternionGroups)
@@ -1184,6 +1224,9 @@ namespace SashaRX.PrefabDoctor
         /// </summary>
         private string ReadPropertyValue(Object obj, string propertyPath)
         {
+            // Unity overloads == for destroyed objects; guard against stale refs.
+            if (obj == null) return null;
+
             if (!_soCache.TryGetValue(obj, out var so))
             {
                 so = new SerializedObject(obj);
