@@ -515,42 +515,51 @@ namespace SashaRX.PrefabDoctor
 
         private VisualElement BuildStatusBar()
         {
-            var bar = new VisualElement();
-            bar.AddToClassList("pd-status-bar");
+            var wrapper = new VisualElement();
+            wrapper.style.flexShrink = 0;
 
+            // Row 1: chain info + elapsed time
+            var row1 = new VisualElement();
+            row1.AddToClassList("pd-status-bar");
             _statusChainLabel = new Label("(no report)");
             _statusChainLabel.AddToClassList("pd-status-chain");
-            bar.Add(_statusChainLabel);
+            row1.Add(_statusChainLabel);
+            _statusElapsedLabel = new Label("");
+            _statusElapsedLabel.AddToClassList("pd-status-elapsed");
+            row1.Add(_statusElapsedLabel);
+            wrapper.Add(row1);
+
+            // Row 2: severity + category badges
+            var row2 = new VisualElement();
+            row2.AddToClassList("pd-status-bar");
+            row2.style.borderTopWidth = 0;
 
             _statusPpLabel = MakeBadgeLabel();
-            bar.Add(_statusPpLabel);
+            row2.Add(_statusPpLabel);
             _statusMultiLabel = MakeBadgeLabel();
-            bar.Add(_statusMultiLabel);
+            row2.Add(_statusMultiLabel);
             _statusOrphanLabel = MakeBadgeLabel();
-            bar.Add(_statusOrphanLabel);
+            row2.Add(_statusOrphanLabel);
             _statusInsigLabel = MakeBadgeLabel();
-            bar.Add(_statusInsigLabel);
+            row2.Add(_statusInsigLabel);
 
             var separator = new Label("│");
             separator.style.color = new Color(0.4f, 0.4f, 0.4f);
             separator.style.marginLeft = 6;
             separator.style.marginRight = 6;
-            bar.Add(separator);
+            row2.Add(separator);
 
             _statusLightmapLabel = MakeBadgeLabel();
-            bar.Add(_statusLightmapLabel);
+            row2.Add(_statusLightmapLabel);
             _statusNetLabel = MakeBadgeLabel();
-            bar.Add(_statusNetLabel);
+            row2.Add(_statusNetLabel);
             _statusFlagsLabel = MakeBadgeLabel();
-            bar.Add(_statusFlagsLabel);
+            row2.Add(_statusFlagsLabel);
             _statusOtherLabel = MakeBadgeLabel();
-            bar.Add(_statusOtherLabel);
+            row2.Add(_statusOtherLabel);
 
-            _statusElapsedLabel = new Label("");
-            _statusElapsedLabel.AddToClassList("pd-status-elapsed");
-            bar.Add(_statusElapsedLabel);
-
-            return bar;
+            wrapper.Add(row2);
+            return wrapper;
         }
 
         private static Label MakeBadgeLabel()
