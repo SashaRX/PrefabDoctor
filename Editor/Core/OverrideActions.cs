@@ -236,6 +236,18 @@ namespace SashaRX.PrefabDoctor
                 var analyzer = new OverrideAnalyzer();
                 var chainCache = new Dictionary<int, List<NestingLevel>>();
 
+                // Phase 1: collect all (prefabRoot, propertyPath, targetId)
+                // triples to remove, grouped by the prefab root's instance
+                // ID. This avoids the O(N²) trap of calling
+                // RemoveModification per conflict — each call read + filtered
+                // + wrote the full PropertyModification array, so 5800
+                // conflicts on one instance = 5800 read/filter/write cycles
+                // on the same multi-thousand-entry array. Now we read ONCE,
+                // build a HashSet of keys to remove, filter in one pass, and
+                // write ONCE per prefab root.
+                var toRemove = new Dictionary<int, (GameObject root,
+                    HashSet<(string propertyPath, int targetId)> keys)>();
+
                 foreach (var (instanceRoot, conflict) in tasks)
                 {
                     if (instanceRoot == null || conflict == null) continue;
@@ -252,7 +264,34 @@ namespace SashaRX.PrefabDoctor
                         var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
                         if (level.Root == null) continue;
 
-                        RemoveModification(level.Root, conflict.Key);
+                        int levelRootId = level.Root.GetInstanceID();
+                        if (!toRemove.TryGetValue(levelRootId, out var bucket))
+                        {
+                            bucket = (level.Root, new HashSet<(string, int)>());
+                            toRemove[levelRootId] = bucket;
+                        }
+
+                        bucket.keys.Add((conflict.Key.PropertyPath,
+                            conflict.Key.TargetInstanceId));
+                    }
+                }
+
+                // Phase 2: for each unique prefab root, read mods ONCE,
+                // filter out all matching keys in a single pass, write ONCE.
+                foreach (var (_, (prefabRoot, keys)) in toRemove)
+                {
+                    var mods = PrefabUtility.GetPropertyModifications(prefabRoot);
+                    if (mods == null || mods.Length == 0) continue;
+
+                    var filtered = mods.Where(m =>
+                        !(m.target != null &&
+                          keys.Contains((m.propertyPath,
+                              m.target.GetInstanceID())))).ToArray();
+
+                    if (filtered.Length < mods.Length)
+                    {
+                        Undo.RecordObject(prefabRoot, "Batch revert");
+                        PrefabUtility.SetPropertyModifications(prefabRoot, filtered);
                     }
                 }
             }

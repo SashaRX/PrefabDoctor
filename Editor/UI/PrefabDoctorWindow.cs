@@ -1453,7 +1453,32 @@ namespace SashaRX.PrefabDoctor
         {
             if (_selectedConflicts.Count == 0 || _report == null) return;
 
-            var tasks = ResolveBatchTasks(_selectedConflicts).ToList();
+            int count = _selectedConflicts.Count;
+
+            // Warn on very large batches so the user knows what's coming.
+            if (count > 100000)
+            {
+                bool confirmed = EditorUtility.DisplayDialog(
+                    "Prefab Doctor — Batch Revert",
+                    $"About to revert {count:N0} selected conflicts.\n\n"
+                    + "This may take a while. Continue?",
+                    "Revert", "Cancel");
+                if (!confirmed) return;
+            }
+
+            EditorUtility.DisplayProgressBar(
+                "Prefab Doctor", $"Resolving {count:N0} conflicts…", 0f);
+
+            List<(GameObject instanceRoot, PropertyConflict conflict)> tasks;
+            try
+            {
+                tasks = ResolveBatchTasks(_selectedConflicts).ToList();
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
             if (tasks.Count == 0)
             {
                 Debug.LogWarning("[Prefab Doctor] Revert Selected: "
@@ -1461,7 +1486,17 @@ namespace SashaRX.PrefabDoctor
                 return;
             }
 
-            OverrideActions.BatchRevert(tasks);
+            EditorUtility.DisplayProgressBar(
+                "Prefab Doctor", $"Reverting {tasks.Count:N0} conflicts…", 0.3f);
+            try
+            {
+                OverrideActions.BatchRevert(tasks);
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
             Debug.Log($"[Prefab Doctor] Batch reverted {tasks.Count} conflicts");
 
             if (_report.IsHierarchyMode)
