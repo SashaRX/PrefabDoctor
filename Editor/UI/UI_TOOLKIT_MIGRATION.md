@@ -1,9 +1,14 @@
 # UI Toolkit Migration Notes — PrefabDoctorWindow
 
-Research-only document. Nothing in this file is wired into the project yet; the
-current window is pure IMGUI (`Editor/UI/PrefabDoctorWindow.cs`). Goal: catalog
-what a UI Toolkit port would look like, and explicitly call out version gaps so
-the runtime minimum can be raised deliberately.
+## Status: Implemented (Phases 1-3)
+
+- **Phase 1** (`9c9d4e3`): Conflict list → MultiColumnListView + ConflictHandle batch selection.
+- **Phase 2** (`d93efd9`): Toolbar, status bar, left panel (ListView), empty state → UI Toolkit.
+- **Phase 3** (`current`): PrefabDoctor.uss theme file. ProjectScanPanel stays IMGUI via IMGUIContainer.
+
+The Instance Analysis tab is 100% UI Toolkit. The Project Scan tab
+remains IMGUI — it works correctly behind an IMGUIContainer wrapper
+and is lower-priority for migration.
 
 ## Unity version baseline
 

@@ -223,6 +223,12 @@ namespace SashaRX.PrefabDoctor
             var root = rootVisualElement;
             root.style.flexDirection = FlexDirection.Column;
 
+            // Load USS theme
+            var uss = AssetDatabase.LoadAssetAtPath<StyleSheet>(
+                "Packages/com.sasharx.prefab-doctor/Editor/UI/PrefabDoctor.uss");
+            if (uss != null)
+                root.styleSheets.Add(uss);
+
             // Tab bar
             _tabToolbar = new Toolbar();
             _instanceTabToggle = new ToolbarToggle { text = "Instance Analysis" };
