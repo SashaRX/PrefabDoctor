@@ -140,9 +140,8 @@ namespace SashaRX.PrefabDoctor
         private Label _batchCountLabel;
         private MultiColumnListView _conflictListView;
         private VisualElement _healthDetailContainer; // health details for selected asset
+        private VisualElement _healthActionBar; // action buttons for selected health item
         private Label _healthDetailLabel;
-        private MultiColumnListView _healthDetailListView;
-        private readonly List<PrefabScanResult> _healthDetailRows = new();
 
         // Empty state
         private VisualElement _emptyState;
@@ -1121,6 +1120,18 @@ namespace SashaRX.PrefabDoctor
             _healthDetailContainer.style.flexDirection = FlexDirection.Column;
             _healthDetailContainer.style.display = DisplayStyle.None;
 
+            // Action bar: Ping, Open Prefab, Fix action
+            _healthActionBar = new VisualElement();
+            _healthActionBar.style.flexDirection = FlexDirection.Row;
+            _healthActionBar.style.flexShrink = 0;
+            _healthActionBar.style.paddingTop = 4;
+            _healthActionBar.style.paddingBottom = 4;
+            _healthActionBar.style.paddingLeft = 8;
+            _healthActionBar.style.paddingRight = 8;
+            _healthActionBar.style.borderBottomWidth = 1;
+            _healthActionBar.style.borderBottomColor = new Color(0, 0, 0, 0.3f);
+            _healthDetailContainer.Add(_healthActionBar);
+
             _healthDetailLabel = new Label("Select an asset from the Health section.");
             _healthDetailLabel.style.paddingTop = 8;
             _healthDetailLabel.style.paddingBottom = 8;
@@ -1128,6 +1139,8 @@ namespace SashaRX.PrefabDoctor
             _healthDetailLabel.style.paddingRight = 8;
             _healthDetailLabel.style.whiteSpace = WhiteSpace.Normal;
             _healthDetailLabel.style.color = new Color(0.85f, 0.85f, 0.85f);
+            _healthDetailLabel.style.flexGrow = 1;
+            _healthDetailLabel.style.overflow = Overflow.Hidden;
             _healthDetailContainer.Add(_healthDetailLabel);
 
             panel.Add(_healthDetailContainer);
@@ -1156,16 +1169,79 @@ namespace SashaRX.PrefabDoctor
         {
             if (_healthDetailLabel == null || _healthReport == null) return;
 
+            // Rebuild action bar
+            _healthActionBar.Clear();
+
             if (_selectedHealthIndex < 0
                 || _selectedHealthIndex >= _healthReport.Results.Count)
             {
                 _healthDetailLabel.text = "Select an asset from the Health section.";
+                SetDisplay(_healthActionBar, false);
                 return;
             }
 
             var r = _healthReport.Results[_selectedHealthIndex];
+            SetDisplay(_healthActionBar, true);
+
+            // ── Action buttons ──
+            var pingBtn = new Button(() =>
+            {
+                var obj = AssetDatabase.LoadMainAssetAtPath(r.AssetPath);
+                if (obj != null) { EditorGUIUtility.PingObject(obj); Selection.activeObject = obj; }
+            }) { text = "Ping" };
+            _healthActionBar.Add(pingBtn);
+
+            var openBtn = new Button(() =>
+                AssetDatabase.OpenAsset(AssetDatabase.LoadMainAssetAtPath(r.AssetPath)))
+            { text = "Open Prefab" };
+            _healthActionBar.Add(openBtn);
+
+            var copyBtn = new Button(() =>
+                EditorGUIUtility.systemCopyBuffer = r.AssetPath)
+            { text = "Copy Path" };
+            _healthActionBar.Add(copyBtn);
+
+            // Category-specific fix button
+            switch (r.PrimaryCategory)
+            {
+                case PrefabHealthCategory.MissingScripts:
+                    var rmBtn = new Button(() =>
+                    {
+                        ProjectScanActions.RemoveMissingScripts(r.AssetPath);
+                        Debug.Log($"[Prefab Doctor] Removed missing scripts from {r.DisplayName}");
+                        RunUnifiedAnalysis();
+                    }) { text = "Remove Missing Scripts" };
+                    rmBtn.style.color = new Color(1f, 0.5f, 0f);
+                    _healthActionBar.Add(rmBtn);
+                    break;
+
+                case PrefabHealthCategory.UnusedOverrides:
+                case PrefabHealthCategory.BrokenReferences:
+                    var cleanBtn = new Button(() =>
+                    {
+                        ProjectScanActions.RemoveUnusedOverrides(r.AssetPath);
+                        Debug.Log($"[Prefab Doctor] Cleaned overrides on {r.DisplayName}");
+                        RunUnifiedAnalysis();
+                    }) { text = "Clean Overrides" };
+                    cleanBtn.style.color = new Color(0.5f, 0.8f, 1f);
+                    _healthActionBar.Add(cleanBtn);
+                    break;
+
+                case PrefabHealthCategory.FbxWithoutWrapper:
+                    var wrapBtn = new Button(() =>
+                    {
+                        ProjectScanActions.CreateFbxWrapper(r.BaseFbxPath);
+                        Debug.Log($"[Prefab Doctor] Created wrapper for {r.BaseFbxPath}");
+                        RunUnifiedAnalysis();
+                    }) { text = "Create FBX Wrapper" };
+                    wrapBtn.style.color = new Color(1f, 0.75f, 0f);
+                    _healthActionBar.Add(wrapBtn);
+                    break;
+            }
+
+            // ── Detail text ──
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"<b>{r.DisplayName}</b>");
+            sb.AppendLine(r.DisplayName);
             sb.AppendLine($"Path: {r.AssetPath}");
             sb.AppendLine($"Category: {ProjectScanPanel.CategoryLabel(r.PrimaryCategory)}");
             sb.AppendLine();
@@ -1176,7 +1252,7 @@ namespace SashaRX.PrefabDoctor
                 sb.AppendLine();
                 sb.AppendLine("Bad materials:");
                 foreach (var mat in r.BadMaterials)
-                    sb.AppendLine($"  {mat.MaterialName} — {mat.Reason}");
+                    sb.AppendLine($"  {mat.MaterialName} — {mat.ShaderName} ({mat.Reason})");
             }
 
             if (r.ImportIssues != null && r.ImportIssues.Count > 0)
