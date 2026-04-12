@@ -56,6 +56,15 @@ namespace SashaRX.PrefabDoctor
         private readonly Dictionary<(int rootId, string path), GameObject> _goPathCache = new();
         private readonly Dictionary<(int goId, string typeName), Object> _componentCache = new();
 
+        // Processed-mods cache for hierarchy mode: keyed by the instance ID
+        // of a depth-1+ chain Root (a prefab asset GO), stores the already-
+        // filtered and keyed override entries so CollectOverridesFast can
+        // merge them into the per-instance map with a cheap loop instead of
+        // re-running GetPropertyModifications + ProcessMod for every
+        // instance of the same prefab.
+        private readonly Dictionary<int, List<(PropertyKey key, OverrideEntry entry)>>
+            _processedModsCache = new();
+
         private void BeginRun()
         {
             var settings = PrefabDoctorSettings.GetOrCreateDefault();
@@ -95,6 +104,7 @@ namespace SashaRX.PrefabDoctor
             _runIgnoredTypes = null;
             _goPathCache.Clear();
             _componentCache.Clear();
+            _processedModsCache.Clear();
         }
 
         // ── Chain Building ─────────────────────────────────────────
@@ -203,6 +213,14 @@ namespace SashaRX.PrefabDoctor
         /// points. The hierarchy pump already uses a 200ms budget and
         /// yields at instance boundaries; mid-instance yields are pure
         /// overhead on scenes with millions of mods.
+        ///
+        /// Depth 1+ optimisation: prefab-asset chain levels are shared
+        /// across every scene instance of the same prefab. Their
+        /// GetPropertyModifications + ProcessMod results are cached in
+        /// <see cref="_processedModsCache"/> on first encounter and then
+        /// merged into the per-instance map with a cheap loop for every
+        /// subsequent instance. This turns O(instances × mods_per_level)
+        /// Unity API calls at depth 1+ into O(unique_prefabs × mods).
         /// </summary>
         private void CollectOverridesFast(
             List<NestingLevel> chain,
@@ -213,11 +231,53 @@ namespace SashaRX.PrefabDoctor
                 var level = chain[i];
                 if (level.IsSceneInstance && !IncludeSceneOverrides) continue;
 
-                var mods = PrefabUtility.GetPropertyModifications(level.Root);
-                if (mods == null) continue;
+                // Depth 1+ levels point to prefab asset roots, shared across
+                // all instances of the same prefab. Cache the processed
+                // output once and fast-merge for subsequent instances.
+                if (i > 0 && !level.IsSceneInstance)
+                {
+                    int rootId = level.Root.GetInstanceID();
+                    if (!_processedModsCache.TryGetValue(rootId, out var cached))
+                    {
+                        // First encounter: process mods into a temp map,
+                        // flatten to a list, cache.
+                        var tempMap = new Dictionary<PropertyKey, List<OverrideEntry>>();
+                        var mods = PrefabUtility.GetPropertyModifications(level.Root);
+                        if (mods != null)
+                        {
+                            for (int m = 0; m < mods.Length; m++)
+                                ProcessMod(mods[m], level, tempMap, null);
+                        }
 
-                for (int m = 0; m < mods.Length; m++)
-                    ProcessMod(mods[m], level, map, null);
+                        cached = new List<(PropertyKey, OverrideEntry)>();
+                        foreach (var kvp in tempMap)
+                            foreach (var entry in kvp.Value)
+                                cached.Add((kvp.Key, entry));
+
+                        _processedModsCache[rootId] = cached;
+                    }
+
+                    // Fast merge: dictionary lookup + list.Add per entry.
+                    for (int c = 0; c < cached.Count; c++)
+                    {
+                        var (key, entry) = cached[c];
+                        if (!map.TryGetValue(key, out var list))
+                        {
+                            list = new List<OverrideEntry>(4);
+                            map[key] = list;
+                        }
+                        list.Add(entry);
+                    }
+                }
+                else
+                {
+                    // Depth 0 (scene instance): always unique per instance.
+                    var mods = PrefabUtility.GetPropertyModifications(level.Root);
+                    if (mods == null) continue;
+
+                    for (int m = 0; m < mods.Length; m++)
+                        ProcessMod(mods[m], level, map, null);
+                }
             }
         }
 
