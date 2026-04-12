@@ -194,16 +194,14 @@ namespace SashaRX.PrefabDoctor
             }
 
             bool confirmed = EditorUtility.DisplayDialog(
-                "Fix LOD Lightmap Scale",
-                $"About to normalise LOD lightmap scales in {total} prefab files "
+                "Fix LOD Renderer Settings",
+                $"About to normalise LOD renderer settings in {total} prefab files "
                 + $"under '{scope}'.\n\n"
-                + "Phase A — write the canonical cascade into every prefab "
-                + "with a LODGroup:\n"
-                + "    LOD0 = 1.00\n"
-                + "    LOD1 = 0.50\n"
-                + "    LOD2 = 0.25\n"
-                + "    LOD3 = 0.125\n"
-                + "    ...\n\n"
+                + "Phase A — for each LODGroup:\n"
+                + "  • m_ScaleInLightmap cascade: LOD0=1, LOD1=0.5, LOD2=0.25, …\n"
+                + "  • Renderer settings consistency: LOD1+ mirrors LOD0\n"
+                + "    (CastShadows, ReceiveShadows, LightProbeUsage,\n"
+                + "     ReflectionProbeUsage, MotionVectors, etc.)\n\n"
                 + "Phase B — strip every m_ScaleInLightmap PropertyModification "
                 + "from nested PrefabInstance nodes across intermediate prefabs.\n\n"
                 + "This rewrites prefab asset files on disk.\n"
@@ -249,8 +247,8 @@ namespace SashaRX.PrefabDoctor
 
             EditorUtility.DisplayDialog(
                 "Prefab Doctor",
-                $"Phase A: wrote canonical cascade to {phaseAWrites} renderer "
-                + $"m_ScaleInLightmap fields.\n\n"
+                $"Phase A: normalised {phaseAWrites} renderer properties\n"
+                + "(m_ScaleInLightmap cascade + LOD0→LODn settings sync).\n\n"
                 + $"Phase B: stripped {phaseBStripped} m_ScaleInLightmap "
                 + $"modifications from intermediate prefabs.\n\n"
                 + $"Scope: '{scope}'.\n\n"

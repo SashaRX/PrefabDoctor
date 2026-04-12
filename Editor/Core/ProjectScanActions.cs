@@ -388,15 +388,41 @@ namespace SashaRX.PrefabDoctor
             return total;
         }
 
-        // ── LOD Lightmap Scale Canonicalisation ────────────────────
+        // ── LOD Renderer Settings Canonicalisation ─────────────────
+
+        /// <summary>
+        /// Renderer properties that should be identical across all LOD
+        /// levels. LOD0 is the reference — its first renderer's values are
+        /// copied to every renderer in LOD1 and up. <c>m_ScaleInLightmap</c>
+        /// is NOT in this list because it uses the deterministic
+        /// <c>0.5^lodIndex</c> cascade instead of a flat copy.
+        /// </summary>
+        private static readonly string[] s_RendererSettingsToSync =
+        {
+            "m_CastShadows",
+            "m_ReceiveShadows",
+            "m_StaticShadowCaster",
+            "m_DynamicOccludee",
+            "m_LightProbeUsage",
+            "m_ReflectionProbeUsage",
+            "m_MotionVectors",
+            "m_RenderingLayerMask",
+            "m_RayTracingMode",
+        };
 
         /// <summary>
         /// Phase A of the LOD lightmap scale fix: walk every .prefab under
         /// <paramref name="folderScope"/>, find every <see cref="LODGroup"/>
-        /// inside it, and write the canonical cascade
-        /// <c>scale = 0.5 ^ lodIndex</c> onto each LOD's renderers'
-        /// <c>m_ScaleInLightmap</c>. Idempotent: already-correct values
-        /// are left alone so reruns are near-free and file hashes stable.
+        /// inside it, and:
+        /// <list type="number">
+        ///   <item>Write the canonical cascade <c>scale = 0.5 ^ lodIndex</c>
+        ///   onto each LOD's renderers' <c>m_ScaleInLightmap</c>.</item>
+        ///   <item>Copy LOD0's renderer settings
+        ///   (<see cref="s_RendererSettingsToSync"/>) to every renderer in
+        ///   LOD1+, ensuring consistency across LOD levels.</item>
+        /// </list>
+        /// Idempotent: already-correct values are left alone so reruns are
+        /// near-free and file hashes stable.
         ///
         /// Pairs with <see cref="StripLodLightmapScaleOverridesInScope"/>
         /// (Phase B) — run that afterwards to drop stale intermediate
@@ -476,7 +502,19 @@ namespace SashaRX.PrefabDoctor
                 {
                     if (group == null) continue;
                     var lods = group.GetLODs();
-                    if (lods == null) continue;
+                    if (lods == null || lods.Length == 0) continue;
+
+                    // Collect LOD0's reference renderer settings. LOD0 is the
+                    // highest-quality mesh whose settings the artist authored
+                    // intentionally; LOD1+ should mirror them for consistency.
+                    Dictionary<string, SerializedPropertyValue> lod0Settings = null;
+                    var lod0Renderers = lods[0].renderers;
+                    if (lod0Renderers != null && lod0Renderers.Length > 0)
+                    {
+                        var refRenderer = lod0Renderers[0];
+                        if (refRenderer != null)
+                            lod0Settings = ReadRendererSettings(refRenderer);
+                    }
 
                     for (int lodIndex = 0; lodIndex < lods.Length; lodIndex++)
                     {
@@ -489,13 +527,36 @@ namespace SashaRX.PrefabDoctor
                             if (renderer == null) continue;
 
                             using var so = new SerializedObject(renderer);
-                            var prop = so.FindProperty("m_ScaleInLightmap");
-                            if (prop == null) continue;
-                            if (Mathf.Approximately(prop.floatValue, canonical)) continue;
+                            bool dirty = false;
 
-                            prop.floatValue = canonical;
-                            so.ApplyModifiedPropertiesWithoutUndo();
-                            writes++;
+                            // Scale cascade: m_ScaleInLightmap = 0.5^lodIndex
+                            var scaleProp = so.FindProperty("m_ScaleInLightmap");
+                            if (scaleProp != null &&
+                                !Mathf.Approximately(scaleProp.floatValue, canonical))
+                            {
+                                scaleProp.floatValue = canonical;
+                                dirty = true;
+                            }
+
+                            // Renderer settings consistency: LOD1+ must match
+                            // LOD0's reference renderer (CastShadows,
+                            // ReceiveShadows, LightProbeUsage, etc.).
+                            if (lodIndex > 0 && lod0Settings != null)
+                            {
+                                foreach (var kvp in lod0Settings)
+                                {
+                                    var prop = so.FindProperty(kvp.Key);
+                                    if (prop == null) continue;
+                                    if (SetPropertyIfDifferent(prop, kvp.Value))
+                                        dirty = true;
+                                }
+                            }
+
+                            if (dirty)
+                            {
+                                so.ApplyModifiedPropertiesWithoutUndo();
+                                writes++;
+                            }
                         }
                     }
                 }
@@ -503,11 +564,76 @@ namespace SashaRX.PrefabDoctor
             catch (System.Exception ex)
             {
                 Debug.LogError(
-                    $"[Prefab Doctor] LOD cascade failed on {prefabPath}: {ex.Message}");
+                    $"[Prefab Doctor] LOD normalisation failed on {prefabPath}: {ex.Message}");
                 return 0;
             }
 
             return writes;
+        }
+
+        /// <summary>
+        /// Snapshot of a serialised property value — enough to compare and
+        /// write back via <see cref="SetPropertyIfDifferent"/>.
+        /// </summary>
+        private readonly struct SerializedPropertyValue
+        {
+            public readonly SerializedPropertyType Type;
+            public readonly float FloatVal;
+            public readonly int IntVal;
+            public readonly bool BoolVal;
+
+            public SerializedPropertyValue(SerializedProperty prop)
+            {
+                Type = prop.propertyType;
+                FloatVal = Type == SerializedPropertyType.Float ? prop.floatValue : 0f;
+                IntVal = Type == SerializedPropertyType.Integer
+                    || Type == SerializedPropertyType.Enum
+                        ? prop.intValue : 0;
+                BoolVal = Type == SerializedPropertyType.Boolean && prop.boolValue;
+            }
+        }
+
+        private static Dictionary<string, SerializedPropertyValue> ReadRendererSettings(
+            Renderer renderer)
+        {
+            var result = new Dictionary<string, SerializedPropertyValue>(
+                s_RendererSettingsToSync.Length);
+
+            using var so = new SerializedObject(renderer);
+            foreach (string name in s_RendererSettingsToSync)
+            {
+                var prop = so.FindProperty(name);
+                if (prop == null) continue;
+                result[name] = new SerializedPropertyValue(prop);
+            }
+
+            return result;
+        }
+
+        private static bool SetPropertyIfDifferent(SerializedProperty prop,
+            in SerializedPropertyValue reference)
+        {
+            switch (reference.Type)
+            {
+                case SerializedPropertyType.Float:
+                    if (Mathf.Approximately(prop.floatValue, reference.FloatVal)) return false;
+                    prop.floatValue = reference.FloatVal;
+                    return true;
+
+                case SerializedPropertyType.Integer:
+                case SerializedPropertyType.Enum:
+                    if (prop.intValue == reference.IntVal) return false;
+                    prop.intValue = reference.IntVal;
+                    return true;
+
+                case SerializedPropertyType.Boolean:
+                    if (prop.boolValue == reference.BoolVal) return false;
+                    prop.boolValue = reference.BoolVal;
+                    return true;
+
+                default:
+                    return false;
+            }
         }
 
         /// <summary>
