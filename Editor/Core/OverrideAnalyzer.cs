@@ -239,14 +239,12 @@ namespace SashaRX.PrefabDoctor
                     int rootId = level.Root.GetInstanceID();
                     if (!_processedModsCache.TryGetValue(rootId, out var cached))
                     {
-                        // First encounter: process mods into a temp map,
-                        // flatten to a list, cache.
                         var tempMap = new Dictionary<PropertyKey, List<OverrideEntry>>();
                         var mods = PrefabUtility.GetPropertyModifications(level.Root);
                         if (mods != null)
                         {
                             for (int m = 0; m < mods.Length; m++)
-                                ProcessMod(mods[m], level, tempMap, null);
+                                ProcessModFast(mods[m], level, tempMap);
                         }
 
                         cached = new List<(PropertyKey, OverrideEntry)>();
@@ -257,7 +255,6 @@ namespace SashaRX.PrefabDoctor
                         _processedModsCache[rootId] = cached;
                     }
 
-                    // Fast merge: dictionary lookup + list.Add per entry.
                     for (int c = 0; c < cached.Count; c++)
                     {
                         var (key, entry) = cached[c];
@@ -276,9 +273,43 @@ namespace SashaRX.PrefabDoctor
                     if (mods == null) continue;
 
                     for (int m = 0; m < mods.Length; m++)
-                        ProcessMod(mods[m], level, map, null);
+                        ProcessModFast(mods[m], level, map);
                 }
             }
+        }
+
+        /// <summary>
+        /// Stripped-down ProcessMod for hierarchy mode's fast path.
+        /// Skips <c>PrefabUtility.IsDefaultOverride</c> which is the
+        /// single most expensive per-mod call (~5μs × 22M mods = ~110s).
+        /// Default overrides that slip through are harmless — they get
+        /// classified as Insignificant (value matches source) and do not
+        /// affect actionable counts (PP / Multi / Orphan).
+        /// </summary>
+        private void ProcessModFast(PropertyModification mod, NestingLevel level,
+            Dictionary<PropertyKey, List<OverrideEntry>> map)
+        {
+            if (mod.target == null)
+            {
+                var orphanKey = new PropertyKey
+                {
+                    ComponentType = "MISSING",
+                    GameObjectPath = "?",
+                    PropertyPath = mod.propertyPath,
+                    TargetInstanceId = 0
+                };
+                AddToMap(map, orphanKey, level, mod);
+                return;
+            }
+
+            if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
+                return;
+
+            if (IsIgnoredComponentType(mod.target.GetType().Name))
+                return;
+
+            var key = MakeKey(mod);
+            AddToMap(map, key, level, mod);
         }
 
         /// <summary>

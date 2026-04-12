@@ -1755,7 +1755,12 @@ namespace SashaRX.PrefabDoctor
                         ? FilterMode.PingPongOnly
                         : (_report.TotalOrphan + _report.TotalMultiOverride) > 0
                             ? FilterMode.GarbageOnly
-                            : FilterMode.ConflictsOnly;
+                            : FilterMode.AllOverrides;
+
+                    // Sync the ToolbarMenu label with the auto-chosen filter
+                    // so the user sees the actual mode, not a stale label.
+                    if (_filterMenu != null)
+                        _filterMenu.text = FilterModeLabel(_filterMode);
 
                     _hierarchyJob = null;
                     _pendingHierarchyReport = null;
