@@ -395,7 +395,7 @@ namespace SashaRX.PrefabDoctor
             int unused = 0;
             // Cache SerializedObjects by target to avoid repeated creation and
             // ensure proper disposal — each SO holds a native handle.
-            var soCache = new Dictionary<Object, SerializedObject>();
+            var soCache = new Dictionary<UnityEngine.Object, SerializedObject>();
             try
             {
                 foreach (var mod in mods)
