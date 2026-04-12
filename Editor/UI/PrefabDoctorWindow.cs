@@ -846,11 +846,20 @@ namespace SashaRX.PrefabDoctor
             else dotColor = new Color(0.5f, 0.8f, 1f);
             dot.style.backgroundColor = dotColor;
 
-            int slash = goReport.RelativePath.LastIndexOf('/');
-            nameLabel.text = slash >= 0
-                ? goReport.RelativePath[(slash + 1)..]
-                : goReport.RelativePath;
-            nameLabel.tooltip = goReport.RelativePath;
+            // Show last 2 path segments so instances in different locations
+            // are distinguishable (e.g. "Block_01/grass_01_1" vs "Block_02/grass_01_1").
+            string path = goReport.RelativePath;
+            int lastSlash = path.LastIndexOf('/');
+            if (lastSlash > 0)
+            {
+                int prevSlash = path.LastIndexOf('/', lastSlash - 1);
+                nameLabel.text = prevSlash >= 0 ? path[(prevSlash + 1)..] : path;
+            }
+            else
+            {
+                nameLabel.text = path;
+            }
+            nameLabel.tooltip = path;
 
             var sb = new System.Text.StringBuilder();
             if (goReport.PingPongCount > 0) sb.Append("P:").Append(goReport.PingPongCount).Append(' ');
