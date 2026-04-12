@@ -603,6 +603,8 @@ namespace SashaRX.PrefabDoctor
             var sw = Stopwatch.StartNew();
             report.AnalyzedRoot = root;
             report.IsHierarchyMode = true;
+            report.AssetToInstances = new Dictionary<string, List<GameObject>>();
+            report.InstanceToAsset = new Dictionary<GameObject, string>();
 
             BeginRun();
             int myRunId = _runId;
@@ -648,6 +650,23 @@ namespace SashaRX.PrefabDoctor
                 // Orphans action can later call PrefabUtility.SetProperty-
                 // Modifications on it without re-walking the hierarchy.
                 report.HierarchyInstanceRoots.Add(instanceRoot);
+
+                // Map instance → source asset for UI grouping by prefab type.
+                var sourceObj = PrefabUtility.GetCorrespondingObjectFromSource(instanceRoot);
+                if (sourceObj != null)
+                {
+                    string srcPath = AssetDatabase.GetAssetPath(sourceObj);
+                    if (!string.IsNullOrEmpty(srcPath))
+                    {
+                        report.InstanceToAsset[instanceRoot] = srcPath;
+                        if (!report.AssetToInstances.TryGetValue(srcPath, out var instList))
+                        {
+                            instList = new List<GameObject>();
+                            report.AssetToInstances[srcPath] = instList;
+                        }
+                        instList.Add(instanceRoot);
+                    }
+                }
 
                 var chain = BuildChainCached(instanceRoot, chainTemplateCache);
 

@@ -170,5 +170,35 @@ namespace SashaRX.PrefabDoctor
         /// Used to scope the dependency health scan to relevant assets only.
         /// </summary>
         public HashSet<string> DependentAssetPaths = new();
+
+        /// <summary>
+        /// Maps source prefab asset path → list of scene instance roots.
+        /// Populated in hierarchy mode. Used by the UI to group the left
+        /// panel by prefab type instead of individual child GameObjects.
+        /// </summary>
+        public Dictionary<string, List<GameObject>> AssetToInstances;
+
+        /// <summary>
+        /// Maps scene instance root → source prefab asset path.
+        /// Populated in hierarchy mode.
+        /// </summary>
+        public Dictionary<GameObject, string> InstanceToAsset;
+    }
+
+    /// <summary>
+    /// Groups all analysis data for one prefab asset type across all scene
+    /// instances. Built from AnalysisReport for the UI layer.
+    /// </summary>
+    internal class PrefabTypeGroup
+    {
+        public string AssetPath;
+        public string DisplayName;
+        public List<GameObject> Instances = new();
+        public List<GameObjectReport> ChildReports = new();
+        public int TotalConflicts;
+        public int PingPongCount;
+        public int MultiOverrideCount;
+        public int OrphanCount;
+        public int InsignificantCount;
     }
 }
