@@ -1808,7 +1808,12 @@ namespace SashaRX.PrefabDoctor
             _report = null;
             _healthReport = null;
             _targetField?.SetValueWithoutNotify(_target);
-            RunUnifiedAnalysis();
+            // Explicit hierarchy request — bypass auto-detection so we
+            // always run the full hierarchy walk, even on prefab roots.
+            StopDependencyScan();
+            _selectedHealthIndex = -1;
+            _detailMode = DetailMode.None;
+            RunHierarchyAnalysis();
         }
 
         /// <summary>

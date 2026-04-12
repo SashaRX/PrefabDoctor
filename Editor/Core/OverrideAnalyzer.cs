@@ -801,7 +801,7 @@ namespace SashaRX.PrefabDoctor
 
             // Collect dependent asset paths for the health scan.
             foreach (var level in report.Chain)
-                if (!string.IsNullOrEmpty(level.AssetPath))
+                if (!string.IsNullOrEmpty(level.AssetPath) && !level.IsSceneInstance)
                     report.DependentAssetPaths.Add(level.AssetPath);
 
             if (report.Chain.Count < 2)
