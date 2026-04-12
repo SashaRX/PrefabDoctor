@@ -3,7 +3,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using UnityEditor;
+using UnityEditor.UIElements;
 using UnityEngine;
+using UnityEngine.UIElements;
 
 namespace SashaRX.PrefabDoctor
 {
@@ -39,47 +41,106 @@ namespace SashaRX.PrefabDoctor
             BadMaterials
         }
 
+        // ── UI Toolkit elements ───────────────────────────────────
+        private VisualElement _root;
+        private ToolbarMenu _scopeMenu;
+        private ToolbarMenu _filterMenu;
+        private ToolbarToggle _fbxToggle;
+        private ToolbarToggle _matToggle;
+        private VisualElement _statusBar;
+        private Label[] _statusBadges;
+        private Label _statusElapsed;
+        private Label _statusScope;
+        private VisualElement _emptyState;
+        private Label _emptyLabel;
+        private ProgressBar _progressBar;
+        private MultiColumnListView _resultsListView;
+        private List<PrefabScanResult> _filteredCache;
+
         // ── Public interface ───────────────────────────────────────
 
         public bool IsScanning => _scanJob != null;
 
+        public VisualElement BuildRoot()
+        {
+            _root = new VisualElement { style = { flexGrow = 1, flexDirection = FlexDirection.Column } };
+
+            _root.Add(BuildScanToolbar());
+            _root.Add(BuildScanStatusBar());
+
+            _emptyState = new VisualElement { style = { flexGrow = 1, alignItems = Align.Center, justifyContent = Justify.Center } };
+            _emptyLabel = new Label("Click 'Scan Project' to find prefab health issues\nacross the entire project or a specific folder.") { style = { color = new Color(0.6f, 0.6f, 0.6f), unityTextAlign = TextAnchor.MiddleCenter, whiteSpace = WhiteSpace.Normal, maxWidth = 360 } };
+            _emptyState.Add(_emptyLabel);
+            _progressBar = new ProgressBar { lowValue = 0, highValue = 100, title = "0%" };
+            _progressBar.style.width = 320;
+            _progressBar.style.marginTop = 12;
+            _progressBar.style.display = DisplayStyle.None;
+            _emptyState.Add(_progressBar);
+            _root.Add(_emptyState);
+
+            _resultsListView = BuildResultsListView();
+            _resultsListView.style.display = DisplayStyle.None;
+            _root.Add(_resultsListView);
+
+            RefreshVisibility();
+            return _root;
+        }
+
         public void OnGUI()
         {
-            DrawScanToolbar();
-            DrawScanStatusBar();
-
-            if (_scanJob != null)
-            {
-                DrawProgressBar();
-                return;
-            }
-
-            if (_report == null || !_report.IsComplete)
-            {
-                DrawEmptyScanState();
-                return;
-            }
-
-            DrawResultsTable();
+            // Legacy — no longer called. BuildRoot() is used instead.
         }
+
+        private void RefreshVisibility()
+        {
+            if (_root == null) return;
+            bool scanning = _scanJob != null;
+            bool hasReport = _report != null && _report.IsComplete;
+
+            _emptyState.style.display = (!hasReport || scanning) ? DisplayStyle.Flex : DisplayStyle.None;
+            _resultsListView.style.display = (hasReport && !scanning) ? DisplayStyle.Flex : DisplayStyle.None;
+            _progressBar.style.display = scanning ? DisplayStyle.Flex : DisplayStyle.None;
+
+            if (scanning)
+            {
+                _emptyLabel.text = "Scanning project…";
+                _progressBar.value = _progress * 100f;
+                _progressBar.title = $"{_progress * 100f:F0}%";
+            }
+            else if (!hasReport)
+            {
+                _emptyLabel.text = "Click 'Scan Project' to find prefab health issues\nacross the entire project or a specific folder.";
+            }
+        }
+
+        private void OnScanComplete()
+        {
+            _selected.Clear();
+            RefreshStatusBar();
+            RebuildResultsList();
+            RefreshVisibility();
+        }
+
+        // OnGUI removed — BuildRoot() is the UI Toolkit replacement.
 
         public void PumpScanJob()
         {
             if (_scanJob == null) return;
 
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 16)
+            while (sw.ElapsedMilliseconds < 200)
             {
                 if (!_scanJob.MoveNext())
                 {
                     _report = _pendingReport;
                     _scanJob = null;
                     _pendingReport = null;
-                    _selected.Clear();
+                    OnScanComplete();
                     return;
                 }
                 _progress = _scanJob.Current;
             }
+            RefreshVisibility();
         }
 
         public void OnDisable()
@@ -87,73 +148,419 @@ namespace SashaRX.PrefabDoctor
             _scanJob = null;
         }
 
-        // ── Toolbar ────────────────────────────────────────────────
+        // ── UI Toolkit Builders ───────────────────────────────────
 
-        private void DrawScanToolbar()
+        private Toolbar BuildScanToolbar()
         {
-            EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
+            var tb = new Toolbar();
 
-            // Folder scope
-            if (GUILayout.Button(_folderScope ?? "Entire Project",
-                    EditorStyles.toolbarDropDown, GUILayout.Width(160)))
+            _scopeMenu = new ToolbarMenu { text = _folderScope ?? "Entire Project" };
+            _scopeMenu.style.minWidth = 160;
+            _scopeMenu.menu.AppendAction("Entire Project", _ => { _folderScope = null; _scopeMenu.text = "Entire Project"; });
+            _scopeMenu.menu.AppendSeparator();
+            _scopeMenu.menu.AppendAction("Pick Folder…", _ =>
             {
-                var menu = new GenericMenu();
-                menu.AddItem(new GUIContent("Entire Project"), _folderScope == null, () =>
-                    _folderScope = null);
-                menu.AddSeparator("");
-                menu.AddItem(new GUIContent("Pick Folder..."), false, () =>
+                string path = EditorUtility.OpenFolderPanel("Scan Folder", "Assets", "");
+                if (!string.IsNullOrEmpty(path))
                 {
-                    string path = EditorUtility.OpenFolderPanel("Scan Folder", "Assets", "");
-                    if (!string.IsNullOrEmpty(path))
-                    {
-                        // Convert to project-relative
-                        if (path.StartsWith(Application.dataPath))
-                            path = "Assets" + path[Application.dataPath.Length..];
-                        _folderScope = path;
-                    }
-                });
-                menu.ShowAsContext();
-            }
-
-            GUILayout.Space(4);
-
-            // Scan button
-            GUI.backgroundColor = new Color(0.4f, 0.7f, 1f);
-            if (GUILayout.Button("Scan Project", EditorStyles.toolbarButton, GUILayout.Width(90)))
-                RunScan();
-            GUI.backgroundColor = Color.white;
-
-            GUILayout.Space(8);
-
-            // Filter
-            _filterMode = (ScanFilterMode)EditorGUILayout.EnumPopup(_filterMode,
-                EditorStyles.toolbarDropDown, GUILayout.Width(120));
-
-            GUILayout.FlexibleSpace();
-
-            // Toggles
-            _auditFbx = GUILayout.Toggle(_auditFbx, "FBX Audit",
-                EditorStyles.toolbarButton, GUILayout.Width(65));
-            _checkMaterials = GUILayout.Toggle(_checkMaterials, "Materials",
-                EditorStyles.toolbarButton, GUILayout.Width(60));
-
-            GUILayout.Space(4);
-
-            // Batch actions
-            if (_report != null && _report.IsComplete)
-            {
-                if (_selected.Count > 0 && GUILayout.Button(
-                        $"Batch ({_selected.Count})", EditorStyles.toolbarDropDown,
-                        GUILayout.Width(80)))
-                {
-                    ShowBatchMenu();
+                    if (path.StartsWith(Application.dataPath))
+                        path = "Assets" + path[Application.dataPath.Length..];
+                    _folderScope = path;
+                    _scopeMenu.text = path;
                 }
-            }
+            });
+            tb.Add(_scopeMenu);
 
-            EditorGUILayout.EndHorizontal();
+            var scanBtn = new ToolbarButton(() => { RunScan(); RefreshVisibility(); }) { text = "Scan Project" };
+            scanBtn.style.color = new Color(0.4f, 0.75f, 1f);
+            tb.Add(scanBtn);
+
+            tb.Add(new ToolbarSpacer());
+
+            _filterMenu = new ToolbarMenu { text = "All Issues" };
+            _filterMenu.style.minWidth = 120;
+            foreach (ScanFilterMode fm in System.Enum.GetValues(typeof(ScanFilterMode)))
+            {
+                var cap = fm;
+                _filterMenu.menu.AppendAction(ScanFilterLabel(cap), _ =>
+                {
+                    _filterMode = cap;
+                    _filterMenu.text = ScanFilterLabel(cap);
+                    RebuildResultsList();
+                }, _ => _filterMode == cap ? DropdownMenuAction.Status.Checked : DropdownMenuAction.Status.Normal);
+            }
+            tb.Add(_filterMenu);
+
+            tb.Add(new ToolbarSpacer { style = { flexGrow = 1 } });
+
+            _fbxToggle = new ToolbarToggle { text = "FBX Audit", value = _auditFbx };
+            _fbxToggle.RegisterValueChangedCallback(e => _auditFbx = e.newValue);
+            tb.Add(_fbxToggle);
+
+            _matToggle = new ToolbarToggle { text = "Materials", value = _checkMaterials };
+            _matToggle.RegisterValueChangedCallback(e => _checkMaterials = e.newValue);
+            tb.Add(_matToggle);
+
+            var cleanBtn = new ToolbarButton(DoCleanAllUnused) { text = "Clean All Unused" };
+            cleanBtn.style.color = new Color(1f, 0.75f, 0.3f);
+            tb.Add(cleanBtn);
+
+            var lodBtn = new ToolbarButton(DoNormaliseLodLightmapScale) { text = "Fix LOD Lightmap Scale" };
+            lodBtn.style.color = new Color(0.3f, 0.85f, 0.85f);
+            tb.Add(lodBtn);
+
+            return tb;
         }
 
-        // ── Status bar ─────────────────────────────────────────────
+        private static string ScanFilterLabel(ScanFilterMode m) => m switch
+        {
+            ScanFilterMode.AllIssues => "All Issues",
+            ScanFilterMode.FbxBased => "FBX Based",
+            ScanFilterMode.Broken => "Broken",
+            ScanFilterMode.MissingScripts => "Missing Scripts",
+            ScanFilterMode.UnusedOverrides => "Unused Overrides",
+            ScanFilterMode.BadMaterials => "Bad Materials",
+            _ => m.ToString()
+        };
+
+        private VisualElement BuildScanStatusBar()
+        {
+            _statusBar = new VisualElement { style = { flexDirection = FlexDirection.Row, alignItems = Align.Center, flexShrink = 0, paddingLeft = 6, paddingRight = 6, paddingTop = 2, paddingBottom = 2, borderBottomWidth = 1, borderBottomColor = new Color(0, 0, 0, 0.35f), backgroundColor = new Color(0.16f, 0.16f, 0.16f, 0.45f) } };
+
+            _statusScope = new Label("(no scan)") { style = { flexGrow = 1, color = new Color(0.75f, 0.75f, 0.75f) } };
+            _statusBar.Add(_statusScope);
+
+            string[] badgeNames = { "Broken", "Missing", "FBX", "Unused", "Mat" };
+            Color[] badgeColors = { Color.red, new Color(1, 0.4f, 0), new Color(1, 0.7f, 0), new Color(0.5f, 0.8f, 1), new Color(1, 0.5f, 1) };
+            _statusBadges = new Label[badgeNames.Length];
+            for (int i = 0; i < badgeNames.Length; i++)
+            {
+                _statusBadges[i] = new Label { style = { marginLeft = 4, marginRight = 4, unityFontStyleAndWeight = FontStyle.Bold, color = new Color(0.45f, 0.45f, 0.45f) } };
+                _statusBar.Add(_statusBadges[i]);
+            }
+
+            _statusElapsed = new Label { style = { marginLeft = 8, color = new Color(0.6f, 0.6f, 0.6f), unityFontStyleAndWeight = FontStyle.Italic } };
+            _statusBar.Add(_statusElapsed);
+
+            return _statusBar;
+        }
+
+        private void RefreshStatusBar()
+        {
+            if (_statusBar == null || _report == null || !_report.IsComplete) return;
+            _statusScope.text = $"{_report.ScanScope} — {_report.TotalPrefabs} prefabs scanned";
+
+            int[] counts = { _report.Broken, _report.MissingScripts, _report.FbxWithoutWrapper, _report.UnusedOverrides, _report.BadMaterialCount };
+            string[] names = { "Broken", "Missing", "FBX", "Unused", "Mat" };
+            Color[] active = { Color.red, new Color(1, 0.4f, 0), new Color(1, 0.7f, 0), new Color(0.5f, 0.8f, 1), new Color(1, 0.5f, 1) };
+            for (int i = 0; i < _statusBadges.Length; i++)
+            {
+                _statusBadges[i].text = $"{names[i]}:{counts[i]}";
+                _statusBadges[i].style.color = counts[i] > 0 ? active[i] : new Color(0.45f, 0.45f, 0.45f);
+            }
+            _statusElapsed.text = $"{_report.ScanTimeMs:F0}ms";
+        }
+
+        private MultiColumnListView BuildResultsListView()
+        {
+            var cols = new Columns();
+
+            var catCol = new Column { name = "cat", title = "Category", stretchable = false };
+            catCol.width = 110; catCol.makeCell = () => MakeScanLabel(); catCol.bindCell = BindCatCell;
+            cols.Add(catCol);
+
+            var prefabCol = new Column { name = "prefab", title = "Prefab", stretchable = false };
+            prefabCol.width = 200; prefabCol.makeCell = MakePrefabCell; prefabCol.bindCell = BindPrefabCell;
+            cols.Add(prefabCol);
+
+            var detailsCol = new Column { name = "details", title = "Details", stretchable = true };
+            detailsCol.minWidth = 200; detailsCol.makeCell = () => MakeScanLabel(); detailsCol.bindCell = BindDetailsCell;
+            cols.Add(detailsCol);
+
+            var actionCol = new Column { name = "action", title = "Action", stretchable = false };
+            actionCol.width = 120; actionCol.makeCell = MakeActionCell; actionCol.bindCell = BindActionCell;
+            cols.Add(actionCol);
+
+            var lv = new MultiColumnListView(cols)
+            {
+                selectionType = SelectionType.Multiple,
+                fixedItemHeight = 22,
+                reorderable = false,
+                showBorder = true,
+                showBoundCollectionSize = false,
+                virtualizationMethod = CollectionVirtualizationMethod.FixedHeight,
+                viewDataKey = "prefab-doctor-scan-results"
+            };
+            lv.style.flexGrow = 1;
+            return lv;
+        }
+
+        private Label MakeScanLabel()
+        {
+            var lbl = new Label { style = { unityTextAlign = TextAnchor.MiddleLeft, marginLeft = 4, marginRight = 4, overflow = Overflow.Hidden, textOverflow = TextOverflow.Ellipsis, whiteSpace = WhiteSpace.NoWrap } };
+            lbl.AddManipulator(new ContextualMenuManipulator(PopulateScanRowMenu));
+            return lbl;
+        }
+
+        private VisualElement MakeActionCell()
+        {
+            var btn = new Button { style = { flexGrow = 1 } };
+            btn.AddManipulator(new ContextualMenuManipulator(PopulateScanRowMenu));
+            return btn;
+        }
+
+        private void BindCatCell(VisualElement el, int idx)
+        {
+            var lbl = (Label)el;
+            if (idx < 0 || _filteredCache == null || idx >= _filteredCache.Count) { lbl.text = ""; return; }
+            var r = _filteredCache[idx]; lbl.userData = idx;
+            lbl.text = r.PrimaryCategory switch
+            {
+                PrefabHealthCategory.Broken => "BROKEN",
+                PrefabHealthCategory.MissingScripts => "Missing Scripts",
+                PrefabHealthCategory.FbxWithoutWrapper => "FBX (no wrap)",
+                PrefabHealthCategory.FbxHasWrapper => "FBX (has wrap)",
+                PrefabHealthCategory.BrokenReferences => "Broken Refs",
+                PrefabHealthCategory.BadMaterials => "Bad Materials",
+                PrefabHealthCategory.UnusedOverrides => "Unused Ovr",
+                PrefabHealthCategory.FbxImportNoise => "FBX Import",
+                _ => "?"
+            };
+        }
+
+        private Label MakePrefabCell()
+        {
+            var lbl = MakeScanLabel();
+            lbl.style.color = new Color(0.4f, 0.7f, 1f);
+            lbl.RegisterCallback<ClickEvent>(e =>
+            {
+                if (lbl.userData is int i && _filteredCache != null && i >= 0 && i < _filteredCache.Count)
+                {
+                    var obj = AssetDatabase.LoadMainAssetAtPath(_filteredCache[i].AssetPath);
+                    if (obj != null) { EditorGUIUtility.PingObject(obj); Selection.activeObject = obj; }
+                }
+            });
+            return lbl;
+        }
+
+        private void BindPrefabCell(VisualElement el, int idx)
+        {
+            var lbl = (Label)el;
+            if (idx < 0 || _filteredCache == null || idx >= _filteredCache.Count) { lbl.text = ""; lbl.userData = -1; return; }
+            var r = _filteredCache[idx]; lbl.userData = idx;
+            lbl.text = r.DisplayName;
+            lbl.tooltip = r.AssetPath;
+        }
+
+        private void BindDetailsCell(VisualElement el, int idx)
+        {
+            var lbl = (Label)el;
+            if (idx < 0 || _filteredCache == null || idx >= _filteredCache.Count) { lbl.text = ""; return; }
+            lbl.userData = idx;
+            lbl.text = BuildDetailsString(_filteredCache[idx]);
+        }
+
+        private void BindActionCell(VisualElement el, int idx)
+        {
+            var btn = (Button)el;
+            btn.clicked -= null; // can't easily unsubscribe lambdas
+            if (idx < 0 || _filteredCache == null || idx >= _filteredCache.Count) { btn.text = ""; btn.SetEnabled(false); return; }
+            var r = _filteredCache[idx]; btn.userData = idx; btn.SetEnabled(true);
+
+            switch (r.PrimaryCategory)
+            {
+                case PrefabHealthCategory.FbxWithoutWrapper:
+                    btn.text = "Create Wrapper";
+                    btn.clickable = new Clickable(() => { ProjectScanActions.CreateFbxWrapper(r.BaseFbxPath); RunScan(); OnScanComplete(); });
+                    break;
+                case PrefabHealthCategory.MissingScripts:
+                    btn.text = "Remove Scripts";
+                    btn.clickable = new Clickable(() => { ProjectScanActions.RemoveMissingScripts(r.AssetPath); RunScan(); OnScanComplete(); });
+                    break;
+                case PrefabHealthCategory.UnusedOverrides:
+                case PrefabHealthCategory.BrokenReferences:
+                    btn.text = "Clean Overrides";
+                    btn.clickable = new Clickable(() => { ProjectScanActions.RemoveUnusedOverrides(r.AssetPath); RunScan(); OnScanComplete(); });
+                    break;
+                default:
+                    btn.text = "—";
+                    btn.SetEnabled(false);
+                    break;
+            }
+        }
+
+        private void PopulateScanRowMenu(ContextualMenuPopulateEvent evt)
+        {
+            if (!(evt.target is VisualElement ve) || !(ve.userData is int idx)) return;
+            if (_filteredCache == null || idx < 0 || idx >= _filteredCache.Count) return;
+            var r = _filteredCache[idx];
+
+            evt.menu.AppendAction("Ping in Project", _ =>
+            {
+                var obj = AssetDatabase.LoadMainAssetAtPath(r.AssetPath);
+                if (obj != null) EditorGUIUtility.PingObject(obj);
+            });
+            evt.menu.AppendAction("Open Prefab", _ =>
+                AssetDatabase.OpenAsset(AssetDatabase.LoadMainAssetAtPath(r.AssetPath)));
+            evt.menu.AppendAction("Copy Path", _ =>
+                EditorGUIUtility.systemCopyBuffer = r.AssetPath);
+        }
+
+        private void RebuildResultsList()
+        {
+            if (_resultsListView == null) return;
+            _filteredCache = GetFilteredResults();
+            _resultsListView.itemsSource = _filteredCache;
+            _resultsListView.RefreshItems();
+            RefreshVisibility();
+        }
+
+        // ── Business logic (shared) ───────────────────────────────
+
+        private void DoNormaliseLodLightmapScale()
+        {
+            string scope = _folderScope ?? "Assets";
+
+            // Count prefabs up front — cheap GUID search.
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", new[] { scope });
+            int total = guids.Length;
+            if (total == 0)
+            {
+                EditorUtility.DisplayDialog("Prefab Doctor",
+                    $"No prefab assets found under '{scope}'.", "OK");
+                return;
+            }
+
+            bool confirmed = EditorUtility.DisplayDialog(
+                "Fix LOD Renderer Settings",
+                $"About to normalise LOD renderer settings in {total} prefab files "
+                + $"under '{scope}'.\n\n"
+                + "Phase A — for each LODGroup:\n"
+                + "  • m_ScaleInLightmap cascade: LOD0=1, LOD1=0.5, LOD2=0.25, …\n"
+                + "  • Renderer settings consistency: LOD1+ mirrors LOD0\n"
+                + "    (CastShadows, ReceiveShadows, LightProbeUsage,\n"
+                + "     ReflectionProbeUsage, MotionVectors, etc.)\n\n"
+                + "Phase B — strip every m_ScaleInLightmap PropertyModification "
+                + "from nested PrefabInstance nodes across intermediate prefabs.\n\n"
+                + "This rewrites prefab asset files on disk.\n"
+                + "Recommended: commit the working tree to git first.\n\n"
+                + "Continue?",
+                "Fix",
+                "Cancel");
+
+            if (!confirmed) return;
+
+            int phaseAWrites = 0;
+            int phaseBStripped = 0;
+
+            try
+            {
+                phaseAWrites = ProjectScanActions.NormaliseLodLightmapScaleInScope(
+                    _folderScope,
+                    (i, n, path) =>
+                        EditorUtility.DisplayCancelableProgressBar(
+                            "Prefab Doctor — LOD Cascade (1/2)",
+                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
+                            n > 0 ? (float)i / n : 0f));
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            try
+            {
+                phaseBStripped = ProjectScanActions.StripLodLightmapScaleOverridesInScope(
+                    _folderScope,
+                    (i, n, path) =>
+                        EditorUtility.DisplayCancelableProgressBar(
+                            "Prefab Doctor — Strip Intermediate (2/2)",
+                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
+                            n > 0 ? (float)i / n : 0f));
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            EditorUtility.DisplayDialog(
+                "Prefab Doctor",
+                $"Phase A: normalised {phaseAWrites} renderer properties\n"
+                + "(m_ScaleInLightmap cascade + LOD0→LODn settings sync).\n\n"
+                + $"Phase B: stripped {phaseBStripped} m_ScaleInLightmap "
+                + $"modifications from intermediate prefabs.\n\n"
+                + $"Scope: '{scope}'.\n\n"
+                + "Re-run Scan Project (or hierarchy analysis on your scene) "
+                + "to see the updated state.",
+                "OK");
+
+            if (_report != null && _report.IsComplete)
+                RunScan();
+        }
+
+        private void DoCleanAllUnused()
+        {
+            string scope = _folderScope ?? "Assets";
+
+            // Count prefabs up front so the dialog can show an accurate
+            // total — this is a cheap GUID search, not a full scan.
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", new[] { scope });
+            int total = guids.Length;
+            if (total == 0)
+            {
+                EditorUtility.DisplayDialog("Prefab Doctor",
+                    $"No prefab assets found under '{scope}'.", "OK");
+                return;
+            }
+
+            bool confirmed = EditorUtility.DisplayDialog(
+                "Clean All Unused Overrides",
+                $"About to walk {total} prefab files under '{scope}'.\n\n"
+                + "For each file Prefab Doctor will open it in isolation, "
+                + "collect every nested PrefabInstance, and remove unused "
+                + "overrides via Unity's built-in API (same as the Hierarchy "
+                + "right-click menu, but deep).\n\n"
+                + "This rewrites prefab asset files on disk.\n"
+                + "Recommended: commit the working tree to git first.\n\n"
+                + "Continue?",
+                "Clean",
+                "Cancel");
+
+            if (!confirmed) return;
+
+            int removed = 0;
+            try
+            {
+                removed = ProjectScanActions.CleanAllUnusedOverridesInScope(
+                    _folderScope,
+                    (i, n, path) =>
+                    {
+                        // Returning true cancels the loop.
+                        return EditorUtility.DisplayCancelableProgressBar(
+                            "Prefab Doctor — Clean All Unused",
+                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
+                            n > 0 ? (float)i / n : 0f);
+                    });
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            EditorUtility.DisplayDialog(
+                "Prefab Doctor",
+                $"Removed {removed} unused override modifications across "
+                + $"{total} prefab files under '{scope}'.\n\n"
+                + "Re-run Scan Project to see the updated state.",
+                "OK");
+
+            // Auto-refresh scan if we have a report
+            if (_report != null && _report.IsComplete)
+                RunScan();
+        }
+
+        // ── Legacy IMGUI (dead code, not called) ─────────────────
+        // Kept temporarily for reference. Safe to delete.
 
         private void DrawScanStatusBar()
         {

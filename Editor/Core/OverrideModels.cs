@@ -30,26 +30,33 @@ namespace SashaRX.PrefabDoctor
 
     /// <summary>
     /// Canonical identifier for a property across nesting levels.
-    /// ComponentType + ComponentName + PropertyPath uniquely identifies
-    /// "the same" property regardless of which depth we're looking at.
+    /// (ComponentType, GameObjectPath, PropertyPath) alone is not enough:
+    /// a single GameObject can host several components of the same type
+    /// (e.g. multiple FishNet NetworkBehaviours whose base class name
+    /// collides), and those would otherwise merge into one PropertyConflict
+    /// with parallel OverrideEntries at the same depth. TargetInstanceId
+    /// breaks that tie — it is NOT part of DisplayName so the user-facing
+    /// label still reads cleanly.
     /// </summary>
     internal struct PropertyKey
     {
         public string ComponentType;
         public string GameObjectPath; // relative path within prefab
         public string PropertyPath;
+        public int TargetInstanceId;  // disambiguates same-typed sibling components
 
         public string DisplayName =>
             $"{GameObjectPath}/{ComponentType}::{PropertyPath}";
 
         public override int GetHashCode() =>
-            (ComponentType, GameObjectPath, PropertyPath).GetHashCode();
+            (ComponentType, GameObjectPath, PropertyPath, TargetInstanceId).GetHashCode();
 
         public override bool Equals(object obj) =>
             obj is PropertyKey other &&
             ComponentType == other.ComponentType &&
             GameObjectPath == other.GameObjectPath &&
-            PropertyPath == other.PropertyPath;
+            PropertyPath == other.PropertyPath &&
+            TargetInstanceId == other.TargetInstanceId;
 
         public override string ToString() => DisplayName;
     }
@@ -70,12 +77,29 @@ namespace SashaRX.PrefabDoctor
     }
 
     /// <summary>
+    /// Semantic grouping of overridden properties. Severity tells how bad the
+    /// override is; Category tells what kind of data it is (lightmap noise,
+    /// network noise, transform, etc.) so the UI can filter/summarise it.
+    /// </summary>
+    internal enum OverrideCategory
+    {
+        General,
+        Transform,
+        Lightmap,
+        NetworkNoise,
+        StaticFlags,
+        Name,
+        Material
+    }
+
+    /// <summary>
     /// Full analysis result for one property across the entire nesting chain.
     /// </summary>
     internal class PropertyConflict
     {
         public PropertyKey Key;
         public ConflictSeverity Severity;
+        public OverrideCategory Category;
         public List<OverrideEntry> Overrides = new();
 
         /// <summary>
@@ -121,5 +145,23 @@ namespace SashaRX.PrefabDoctor
 
         /// <summary>Number of PrefabInstance roots analyzed (hierarchy mode).</summary>
         public int InstancesAnalyzed;
+
+        /// <summary>
+        /// Every PrefabInstance root touched by this hierarchy run. Populated
+        /// only when <see cref="IsHierarchyMode"/> is true. Used by the
+        /// bulk Clean Orphans button in the window so it can iterate all
+        /// real scene GameObjects without re-walking the hierarchy.
+        /// </summary>
+        public List<GameObject> HierarchyInstanceRoots = new();
+
+        /// <summary>
+        /// Mapping from <see cref="GameObjectReport.RelativePath"/> to the
+        /// PrefabInstance root that owns it. Populated only in hierarchy
+        /// mode. Used by <c>ResolveBatchTasks</c> to dispatch each
+        /// conflict to the correct nested instance root for
+        /// <see cref="OverrideActions.BatchRevert"/>, bypassing the
+        /// expensive and fragile <c>ResolveByRelativePath</c> path walk.
+        /// </summary>
+        public Dictionary<string, GameObject> GoPathToInstanceRoot;
     }
 }
