@@ -19,20 +19,24 @@ namespace SashaRX.PrefabDoctor
         {
             Undo.SetCurrentGroupName($"Prefab Doctor: Keep at depth {keepDepth}");
             int group = Undo.GetCurrentGroup();
-
-            var chain = new OverrideAnalyzer().BuildChain(root);
-
-            foreach (var entry in conflict.Overrides)
+            try
             {
-                if (entry.Depth == keepDepth) continue;
+                var chain = new OverrideAnalyzer().BuildChain(root);
 
-                var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
-                if (level.Root == null) continue;
+                foreach (var entry in conflict.Overrides)
+                {
+                    if (entry.Depth == keepDepth) continue;
 
-                RemoveModification(level.Root, conflict.Key.PropertyPath, conflict.Key.ComponentType);
+                    var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
+                    if (level.Root == null) continue;
+
+                    RemoveModification(level.Root, conflict.Key);
+                }
             }
-
-            Undo.CollapseUndoOperations(group);
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
         }
 
         /// <summary>
@@ -42,18 +46,22 @@ namespace SashaRX.PrefabDoctor
         {
             Undo.SetCurrentGroupName("Prefab Doctor: Revert all");
             int group = Undo.GetCurrentGroup();
-
-            var chain = new OverrideAnalyzer().BuildChain(root);
-
-            foreach (var entry in conflict.Overrides)
+            try
             {
-                var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
-                if (level.Root == null) continue;
+                var chain = new OverrideAnalyzer().BuildChain(root);
 
-                RemoveModification(level.Root, conflict.Key.PropertyPath, conflict.Key.ComponentType);
+                foreach (var entry in conflict.Overrides)
+                {
+                    var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
+                    if (level.Root == null) continue;
+
+                    RemoveModification(level.Root, conflict.Key);
+                }
             }
-
-            Undo.CollapseUndoOperations(group);
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
         }
 
         /// <summary>
@@ -63,22 +71,70 @@ namespace SashaRX.PrefabDoctor
         {
             Undo.SetCurrentGroupName("Prefab Doctor: Clean orphans");
             int group = Undo.GetCurrentGroup();
-
-            var mods = PrefabUtility.GetPropertyModifications(root);
-            if (mods == null) return 0;
-
-            Undo.RecordObject(root, "Clean orphans");
-
-            var clean = mods.Where(m => m.target != null).ToArray();
-            int removed = mods.Length - clean.Length;
-
-            if (removed > 0)
+            try
             {
-                PrefabUtility.SetPropertyModifications(root, clean);
-            }
+                var mods = PrefabUtility.GetPropertyModifications(root);
+                if (mods == null) return 0;
 
-            Undo.CollapseUndoOperations(group);
-            return removed;
+                Undo.RecordObject(root, "Clean orphans");
+
+                var clean = mods.Where(m => m.target != null).ToArray();
+                int removed = mods.Length - clean.Length;
+
+                if (removed > 0)
+                {
+                    PrefabUtility.SetPropertyModifications(root, clean);
+                }
+
+                return removed;
+            }
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
+        }
+
+        /// <summary>
+        /// Bulk variant of <see cref="CleanOrphans"/>: for every prefab
+        /// instance root in <paramref name="instanceRoots"/>, read its
+        /// PropertyModifications, drop every entry whose target is null,
+        /// and write the cleaned array back. One Undo group for the entire
+        /// batch so the whole operation can be reverted with a single
+        /// Ctrl+Z. Returns the total number of removed modifications.
+        /// </summary>
+        public static int CleanOrphansHierarchy(IReadOnlyList<GameObject> instanceRoots)
+        {
+            if (instanceRoots == null || instanceRoots.Count == 0) return 0;
+
+            Undo.SetCurrentGroupName("Prefab Doctor: Clean orphans (hierarchy)");
+            int group = Undo.GetCurrentGroup();
+            int totalRemoved = 0;
+
+            try
+            {
+                for (int i = 0; i < instanceRoots.Count; i++)
+                {
+                    var root = instanceRoots[i];
+                    if (root == null) continue;
+
+                    var mods = PrefabUtility.GetPropertyModifications(root);
+                    if (mods == null || mods.Length == 0) continue;
+
+                    var clean = mods.Where(m => m.target != null).ToArray();
+                    int removed = mods.Length - clean.Length;
+                    if (removed == 0) continue;
+
+                    Undo.RecordObject(root, "Clean orphans (hierarchy)");
+                    PrefabUtility.SetPropertyModifications(root, clean);
+                    totalRemoved += removed;
+                }
+
+                return totalRemoved;
+            }
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
         }
 
         /// <summary>
@@ -91,108 +147,199 @@ namespace SashaRX.PrefabDoctor
             int group = Undo.GetCurrentGroup();
             int totalRemoved = 0;
 
-            foreach (var level in chain)
+            try
             {
-                if (level.IsSceneInstance) continue;
-                if (level.Root == null) continue;
-
-                var mods = PrefabUtility.GetPropertyModifications(level.Root);
-                if (mods == null) continue;
-
-                var source = PrefabUtility.GetCorrespondingObjectFromSource(level.Root);
-                if (source == null) continue;
-
-                var keep = new List<PropertyModification>();
-                int removed = 0;
-
-                foreach (var mod in mods)
+                foreach (var level in chain)
                 {
-                    if (mod.target == null || PrefabUtility.IsDefaultOverride(mod))
+                    if (level.IsSceneInstance) continue;
+                    if (level.Root == null) continue;
+
+                    var mods = PrefabUtility.GetPropertyModifications(level.Root);
+                    if (mods == null) continue;
+
+                    var source = PrefabUtility.GetCorrespondingObjectFromSource(level.Root);
+                    if (source == null) continue;
+
+                    var keep = new List<PropertyModification>();
+                    int removed = 0;
+
+                    foreach (var mod in mods)
                     {
-                        keep.Add(mod);
-                        continue;
+                        if (mod.target == null || PrefabUtility.IsDefaultOverride(mod))
+                        {
+                            keep.Add(mod);
+                            continue;
+                        }
+
+                        // Find corresponding property on source to compare values
+                        var sourceObj = FindSourceObject(mod.target, source);
+                        if (sourceObj == null)
+                        {
+                            keep.Add(mod);
+                            continue;
+                        }
+
+                        string sourceValue = GetSourcePropertyValue(sourceObj, mod.propertyPath);
+                        if (sourceValue == null)
+                        {
+                            keep.Add(mod);
+                            continue;
+                        }
+
+                        var comparer = ComparerRouter.GetComparer(mod.propertyPath);
+                        if (comparer.AreEffectivelyEqual(mod.value, sourceValue))
+                        {
+                            removed++;
+                        }
+                        else
+                        {
+                            keep.Add(mod);
+                        }
                     }
 
-                    // Find corresponding property on source to compare values
-                    var sourceObj = FindSourceObject(mod.target, source);
-                    if (sourceObj == null)
+                    if (removed > 0)
                     {
-                        keep.Add(mod);
-                        continue;
-                    }
-
-                    string sourceValue = GetSourcePropertyValue(sourceObj, mod.propertyPath);
-                    if (sourceValue == null)
-                    {
-                        keep.Add(mod);
-                        continue;
-                    }
-
-                    var comparer = ComparerRouter.GetComparer(mod.propertyPath);
-                    if (comparer.AreEffectivelyEqual(mod.value, sourceValue))
-                    {
-                        removed++;
-                    }
-                    else
-                    {
-                        keep.Add(mod);
+                        Undo.RecordObject(level.Root, "Clean insignificant");
+                        PrefabUtility.SetPropertyModifications(level.Root, keep.ToArray());
+                        totalRemoved += removed;
                     }
                 }
 
-                if (removed > 0)
-                {
-                    Undo.RecordObject(level.Root, "Clean insignificant");
-                    PrefabUtility.SetPropertyModifications(level.Root, keep.ToArray());
-                    totalRemoved += removed;
-                }
+                return totalRemoved;
             }
-
-            Undo.CollapseUndoOperations(group);
-            return totalRemoved;
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
         }
 
         /// <summary>
-        /// Batch revert: remove all overrides from the provided conflicts.
+        /// Batch revert: remove every override in <paramref name="tasks"/>.
+        /// Each task pairs a PrefabInstance root with one conflict that was
+        /// originally discovered through that root. This overload is the
+        /// correct entry point for hierarchy-mode callers, where different
+        /// conflicts in the same batch can live under different nested
+        /// PrefabInstance owners and therefore need different chains.
+        /// Chains are cached per unique instance root so a big batch still
+        /// only walks each owner once. All removals collapse into one Undo
+        /// group.
+        /// </summary>
+        public static void BatchRevert(
+            IEnumerable<(GameObject instanceRoot, PropertyConflict conflict)> tasks)
+        {
+            if (tasks == null) return;
+
+            Undo.SetCurrentGroupName("Prefab Doctor: Batch revert");
+            int group = Undo.GetCurrentGroup();
+            try
+            {
+                var analyzer = new OverrideAnalyzer();
+                var chainCache = new Dictionary<int, List<NestingLevel>>();
+
+                // Phase 1: collect all (prefabRoot, propertyPath, targetId)
+                // triples to remove, grouped by the prefab root's instance
+                // ID. This avoids the O(N²) trap of calling
+                // RemoveModification per conflict — each call read + filtered
+                // + wrote the full PropertyModification array, so 5800
+                // conflicts on one instance = 5800 read/filter/write cycles
+                // on the same multi-thousand-entry array. Now we read ONCE,
+                // build a HashSet of keys to remove, filter in one pass, and
+                // write ONCE per prefab root.
+                var toRemove = new Dictionary<int, (GameObject root,
+                    HashSet<(string propertyPath, int targetId)> keys)>();
+
+                foreach (var (instanceRoot, conflict) in tasks)
+                {
+                    if (instanceRoot == null || conflict == null) continue;
+
+                    int rootId = instanceRoot.GetInstanceID();
+                    if (!chainCache.TryGetValue(rootId, out var chain))
+                    {
+                        chain = analyzer.BuildChain(instanceRoot);
+                        chainCache[rootId] = chain;
+                    }
+
+                    foreach (var entry in conflict.Overrides)
+                    {
+                        var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
+                        if (level.Root == null) continue;
+
+                        int levelRootId = level.Root.GetInstanceID();
+                        if (!toRemove.TryGetValue(levelRootId, out var bucket))
+                        {
+                            bucket = (level.Root, new HashSet<(string, int)>());
+                            toRemove[levelRootId] = bucket;
+                        }
+
+                        bucket.keys.Add((conflict.Key.PropertyPath,
+                            conflict.Key.TargetInstanceId));
+                    }
+                }
+
+                // Phase 2: for each unique prefab root, read mods ONCE,
+                // filter out all matching keys in a single pass, write ONCE.
+                foreach (var (_, (prefabRoot, keys)) in toRemove)
+                {
+                    var mods = PrefabUtility.GetPropertyModifications(prefabRoot);
+                    if (mods == null || mods.Length == 0) continue;
+
+                    var filtered = mods.Where(m =>
+                        !(m.target != null &&
+                          keys.Contains((m.propertyPath,
+                              m.target.GetInstanceID())))).ToArray();
+
+                    if (filtered.Length < mods.Length)
+                    {
+                        Undo.RecordObject(prefabRoot, "Batch revert");
+                        PrefabUtility.SetPropertyModifications(prefabRoot, filtered);
+                    }
+                }
+            }
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
+        }
+
+        /// <summary>
+        /// Backward-compat wrapper for instance-analysis callers where the
+        /// analyzed root is shared across every conflict in the batch.
+        /// Thin shim over the tasks-based overload.
         /// </summary>
         public static void BatchRevert(GameObject root, IEnumerable<PropertyConflict> conflicts)
         {
-            Undo.SetCurrentGroupName("Prefab Doctor: Batch revert");
-            int group = Undo.GetCurrentGroup();
-
-            var chain = new OverrideAnalyzer().BuildChain(root);
-
-            foreach (var conflict in conflicts)
-            {
-                foreach (var entry in conflict.Overrides)
-                {
-                    var level = chain.FirstOrDefault(l => l.Depth == entry.Depth);
-                    if (level.Root == null) continue;
-
-                    RemoveModification(level.Root, conflict.Key.PropertyPath,
-                        conflict.Key.ComponentType);
-                }
-            }
-
-            Undo.CollapseUndoOperations(group);
+            if (root == null || conflicts == null) return;
+            BatchRevert(conflicts.Select(c => (root, c)));
         }
 
         // ── Internal helpers ───────────────────────────────────────
 
-        private static void RemoveModification(GameObject prefabRoot,
-            string propertyPath, string componentType)
+        /// <summary>
+        /// Strip a single PropertyModification from <paramref name="prefabRoot"/>.
+        /// Matches on (propertyPath, target InstanceID) so sibling components
+        /// of the same type (e.g. two FishNet NetworkBehaviours reporting the
+        /// same <c>GetType().Name</c>) cannot be clobbered by a revert of just
+        /// one of them. Conflicts whose <see cref="PropertyKey.TargetInstanceId"/>
+        /// is 0 (orphans, quaternion synthetic groups) intentionally hit no
+        /// mods here — orphans are handled by <see cref="CleanOrphans"/>,
+        /// quaternion groups are a display-only aggregation.
+        /// </summary>
+        private static void RemoveModification(GameObject prefabRoot, in PropertyKey key)
         {
             var mods = PrefabUtility.GetPropertyModifications(prefabRoot);
             if (mods == null) return;
 
-            Undo.RecordObject(prefabRoot, "Remove override");
+            int targetId = key.TargetInstanceId;
+            string propertyPath = key.PropertyPath;
 
             var filtered = mods.Where(m =>
                 !(m.propertyPath == propertyPath &&
                   m.target != null &&
-                  m.target.GetType().Name == componentType)).ToArray();
+                  m.target.GetInstanceID() == targetId)).ToArray();
 
             if (filtered.Length < mods.Length)
             {
+                Undo.RecordObject(prefabRoot, "Remove override");
                 PrefabUtility.SetPropertyModifications(prefabRoot, filtered);
             }
         }
@@ -205,7 +352,9 @@ namespace SashaRX.PrefabDoctor
 
         private static string GetSourcePropertyValue(Object sourceObj, string propertyPath)
         {
-            var so = new SerializedObject(sourceObj);
+            // SerializedObject owns a native handle; Dispose (via using) ensures
+            // it is released immediately instead of waiting for finalization.
+            using var so = new SerializedObject(sourceObj);
             var prop = so.FindProperty(propertyPath);
             if (prop == null) return null;
 

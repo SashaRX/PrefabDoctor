@@ -11,3 +11,7 @@ REVIEW.md.meta
 
 # Dev files
 .gitignore
+
+# Research docs — git only
+Editor/UI/UI_TOOLKIT_MIGRATION.md
+Editor/UI/UI_TOOLKIT_MIGRATION.md.meta

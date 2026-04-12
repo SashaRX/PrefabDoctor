@@ -25,6 +25,16 @@ namespace SashaRX.PrefabDoctor
         public bool IncludeSceneOverrides = false;
         public bool IncludeInternalProperties = false;
 
+        /// <summary>
+        /// When true, <see cref="ClassifyConflict"/> skips the expensive
+        /// <see cref="CheckInsignificant"/> path (which opens a
+        /// SerializedObject to compare values with epsilon). All
+        /// single-depth overrides are classified as Insignificant
+        /// directly. Actionable counts (PingPong, MultiOverride, Orphan)
+        /// are unaffected. Set automatically in hierarchy mode.
+        /// </summary>
+        public bool FastClassify = false;
+
         private static readonly string[] s_InternalPrefixes =
         {
             "m_CorrespondingSourceObject",
@@ -39,9 +49,83 @@ namespace SashaRX.PrefabDoctor
 
         /// <summary>
         /// Cache of SerializedObject instances — avoids repeated creation.
-        /// Cleared after each analysis run.
+        /// Disposed after each analysis run and when the owning window closes.
         /// </summary>
         private readonly Dictionary<Object, SerializedObject> _soCache = new();
+
+        // Per-run snapshot of ignore rules — rebuilt at the top of each public
+        // entry point so the hot loop does not re-read settings per mod and
+        // does not have to concatenate static + dynamic prefix arrays on the
+        // fly. Lifetime matches _soCache: reset in each finally block.
+        private string[] _runIgnoredPrefixes;
+        private string[] _runIgnoredTypes;
+
+        // Per-run lookup caches. Share lifetime with _soCache so they get
+        // dropped in EndRun(). Avoid repeatedly walking Transform children or
+        // GetComponents() when many overrides target the same GO/component.
+        private readonly Dictionary<(int rootId, string path), GameObject> _goPathCache = new();
+        private readonly Dictionary<(int goId, string typeName), Object> _componentCache = new();
+
+        // Processed-mods cache for hierarchy mode: keyed by the instance ID
+        // of a depth-1+ chain Root (a prefab asset GO), stores the already-
+        // filtered and keyed override entries so CollectOverridesFast can
+        // merge them into the per-instance map with a cheap loop instead of
+        // re-running GetPropertyModifications + ProcessMod for every
+        // instance of the same prefab.
+        private readonly Dictionary<int, List<(PropertyKey key, OverrideEntry entry)>>
+            _processedModsCache = new();
+
+        // Key base cache: MakeKey does GetType().Name (reflection) and
+        // GetRelativePath (walks the whole transform parent chain + string
+        // concat) per mod. All mods targeting the same component share
+        // the same (ComponentType, GameObjectPath, TargetInstanceId) — only
+        // PropertyPath differs. Caching the base by target InstanceID turns
+        // 22M reflection+walk calls into ~5000 on the user's scene.
+        private readonly Dictionary<int, (string componentType, string goPath, int targetId)>
+            _keyBaseCache = new();
+
+        private void BeginRun()
+        {
+            var settings = PrefabDoctorSettings.GetOrCreateDefault();
+            var extra = settings?.AdditionalIgnoredPrefixes ?? Array.Empty<string>();
+
+            if (extra.Length == 0)
+            {
+                _runIgnoredPrefixes = s_InternalPrefixes;
+            }
+            else
+            {
+                _runIgnoredPrefixes = new string[s_InternalPrefixes.Length + extra.Length];
+                Array.Copy(s_InternalPrefixes, 0, _runIgnoredPrefixes, 0, s_InternalPrefixes.Length);
+                Array.Copy(extra, 0, _runIgnoredPrefixes, s_InternalPrefixes.Length, extra.Length);
+            }
+
+            _runIgnoredTypes = settings?.IgnoredComponentTypes ?? Array.Empty<string>();
+        }
+
+        /// <summary>
+        /// Dispose every cached SerializedObject and empty the cache. Safe to
+        /// call multiple times; safe to call when nothing is cached. Use from
+        /// analysis finally blocks and from the window's OnDisable.
+        /// </summary>
+        public void ClearSerializedObjectCache()
+        {
+            if (_soCache.Count == 0) return;
+            foreach (var so in _soCache.Values)
+                so?.Dispose();
+            _soCache.Clear();
+        }
+
+        private void EndRun()
+        {
+            ClearSerializedObjectCache();
+            _runIgnoredPrefixes = null;
+            _runIgnoredTypes = null;
+            _goPathCache.Clear();
+            _componentCache.Clear();
+            _processedModsCache.Clear();
+            _keyBaseCache.Clear();
+        }
 
         // ── Chain Building ─────────────────────────────────────────
 
@@ -79,12 +163,218 @@ namespace SashaRX.PrefabDoctor
             return chain;
         }
 
+        /// <summary>
+        /// Build a chain for <paramref name="instanceRoot"/>, reusing a
+        /// cached template for depth 1+ if one exists. Many scene instances
+        /// share the same prefab asset, so their chains are structurally
+        /// identical from depth 1 onward — only depth 0 (the scene
+        /// instance itself) differs. Caching saves
+        /// O(chain_depth × Unity_API_call) per duplicate instance.
+        /// </summary>
+        private List<NestingLevel> BuildChainCached(
+            GameObject instanceRoot,
+            Dictionary<string, List<NestingLevel>> templateCache)
+        {
+            // Get the immediate source prefab for the cache key.
+            var source = PrefabUtility.GetCorrespondingObjectFromSource(instanceRoot);
+            string cacheKey = source != null ? AssetDatabase.GetAssetPath(source) : null;
+
+            if (!string.IsNullOrEmpty(cacheKey)
+                && templateCache.TryGetValue(cacheKey, out var template))
+            {
+                // Template hit: build depth 0 from the instance, append
+                // the cached depth 1+ levels unchanged.
+                string rootPath = AssetDatabase.GetAssetPath(instanceRoot);
+                bool isScene = string.IsNullOrEmpty(rootPath)
+                    || rootPath.EndsWith(".unity", System.StringComparison.OrdinalIgnoreCase);
+
+                var chain = new List<NestingLevel>(template.Count + 1);
+                chain.Add(new NestingLevel
+                {
+                    Depth = 0,
+                    Root = instanceRoot,
+                    AssetPath = rootPath,
+                    IsSceneInstance = isScene
+                });
+                chain.AddRange(template);
+                return chain;
+            }
+
+            // Miss: full BuildChain, then cache depth 1+ as template.
+            var fullChain = BuildChain(instanceRoot);
+            if (!string.IsNullOrEmpty(cacheKey) && fullChain.Count >= 2)
+            {
+                var tmpl = new List<NestingLevel>(fullChain.Count - 1);
+                for (int t = 1; t < fullChain.Count; t++)
+                    tmpl.Add(fullChain[t]);
+                templateCache[cacheKey] = tmpl;
+            }
+
+            return fullChain;
+        }
+
         // ── Override Collection ────────────────────────────────────
 
         public Dictionary<PropertyKey, List<OverrideEntry>> CollectOverrides(
             List<NestingLevel> chain, Transform subtreeRoot = null)
         {
             var map = new Dictionary<PropertyKey, List<OverrideEntry>>();
+            // Drain the incremental form to completion — this is the sync
+            // wrapper that existing call sites (instance-mode analysis,
+            // unit tests) rely on.
+            foreach (var _ in CollectOverridesIncremental(chain, map, subtreeRoot, 0f)) { }
+            return map;
+        }
+
+        /// <summary>
+        /// Non-yielding override collection for hierarchy mode. Same
+        /// logic as <see cref="CollectOverridesIncremental"/> but without
+        /// the IEnumerator state-machine overhead and per-mod yield
+        /// points. The hierarchy pump already uses a 200ms budget and
+        /// yields at instance boundaries; mid-instance yields are pure
+        /// overhead on scenes with millions of mods.
+        ///
+        /// Depth 1+ optimisation: prefab-asset chain levels are shared
+        /// across every scene instance of the same prefab. Their
+        /// GetPropertyModifications + ProcessMod results are cached in
+        /// <see cref="_processedModsCache"/> on first encounter and then
+        /// merged into the per-instance map with a cheap loop for every
+        /// subsequent instance. This turns O(instances × mods_per_level)
+        /// Unity API calls at depth 1+ into O(unique_prefabs × mods).
+        /// </summary>
+        private void CollectOverridesFast(
+            List<NestingLevel> chain,
+            Dictionary<PropertyKey, List<OverrideEntry>> map)
+        {
+            for (int i = 0; i < chain.Count; i++)
+            {
+                var level = chain[i];
+                if (level.IsSceneInstance && !IncludeSceneOverrides) continue;
+
+                // Depth 1+ levels point to prefab asset roots, shared across
+                // all instances of the same prefab. Cache the processed
+                // output once and fast-merge for subsequent instances.
+                if (i > 0 && !level.IsSceneInstance)
+                {
+                    int rootId = level.Root.GetInstanceID();
+                    if (!_processedModsCache.TryGetValue(rootId, out var cached))
+                    {
+                        var tempMap = new Dictionary<PropertyKey, List<OverrideEntry>>();
+                        var mods = PrefabUtility.GetPropertyModifications(level.Root);
+                        if (mods != null)
+                        {
+                            for (int m = 0; m < mods.Length; m++)
+                                ProcessModFast(mods[m], level, tempMap);
+                        }
+
+                        cached = new List<(PropertyKey, OverrideEntry)>();
+                        foreach (var kvp in tempMap)
+                            foreach (var entry in kvp.Value)
+                                cached.Add((kvp.Key, entry));
+
+                        _processedModsCache[rootId] = cached;
+                    }
+
+                    for (int c = 0; c < cached.Count; c++)
+                    {
+                        var (key, entry) = cached[c];
+                        if (!map.TryGetValue(key, out var list))
+                        {
+                            list = new List<OverrideEntry>(4);
+                            map[key] = list;
+                        }
+                        list.Add(entry);
+                    }
+                }
+                else
+                {
+                    // Depth 0 (scene instance): always unique per instance.
+                    var mods = PrefabUtility.GetPropertyModifications(level.Root);
+                    if (mods == null) continue;
+
+                    for (int m = 0; m < mods.Length; m++)
+                        ProcessModFast(mods[m], level, map);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Stripped-down ProcessMod for hierarchy mode's fast path.
+        /// Two key differences from the regular <see cref="ProcessMod"/>:
+        /// <list type="number">
+        ///   <item>Skips <c>PrefabUtility.IsDefaultOverride</c> (~2-5μs
+        ///   per call × 22M mods = ~50-110s saved). Default overrides
+        ///   that slip through are classified as Insignificant and don't
+        ///   affect actionable counts.</item>
+        ///   <item>Uses <see cref="_keyBaseCache"/> to avoid
+        ///   <c>GetType().Name</c> (reflection) and
+        ///   <c>GetRelativePath</c> (transform parent walk + string
+        ///   concat) for every mod. All mods targeting the same component
+        ///   share the same key base — only <c>PropertyPath</c> differs.
+        ///   22M lookups → ~5000 computes.</item>
+        /// </list>
+        /// </summary>
+        private void ProcessModFast(PropertyModification mod, NestingLevel level,
+            Dictionary<PropertyKey, List<OverrideEntry>> map)
+        {
+            if (mod.target == null)
+            {
+                var orphanKey = new PropertyKey
+                {
+                    ComponentType = "MISSING",
+                    GameObjectPath = "?",
+                    PropertyPath = mod.propertyPath,
+                    TargetInstanceId = 0
+                };
+                AddToMap(map, orphanKey, level, mod);
+                return;
+            }
+
+            if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
+                return;
+
+            // Cached key base: GetType().Name + GetRelativePath + GetInstanceID
+            int targetId = mod.target.GetInstanceID();
+            if (!_keyBaseCache.TryGetValue(targetId, out var keyBase))
+            {
+                string typeName = mod.target.GetType().Name;
+                keyBase = (typeName, GetRelativePath(mod.target), targetId);
+                _keyBaseCache[targetId] = keyBase;
+            }
+
+            if (IsIgnoredComponentType(keyBase.componentType))
+                return;
+
+            var key = new PropertyKey
+            {
+                ComponentType = keyBase.componentType,
+                GameObjectPath = keyBase.goPath,
+                PropertyPath = mod.propertyPath,
+                TargetInstanceId = keyBase.targetId
+            };
+            AddToMap(map, key, level, mod);
+        }
+
+        /// <summary>
+        /// Incremental override collection. Fills <paramref name="map"/> in
+        /// place and yields the <paramref name="progress"/> value every
+        /// <c>modBudgetPerYield</c> processed modifications so the caller
+        /// can keep the editor responsive even on prefab instances with
+        /// thousands of property modifications (network backing fields,
+        /// scene-level overrides, etc.).
+        ///
+        /// The yielded float is just a hint for the caller's progress bar;
+        /// the real signal is "we yielded" (giving the pump a chance to
+        /// breathe), not the numeric value.
+        /// </summary>
+        private IEnumerable<float> CollectOverridesIncremental(
+            List<NestingLevel> chain,
+            Dictionary<PropertyKey, List<OverrideEntry>> map,
+            Transform subtreeRoot,
+            float progress)
+        {
+            const int modBudgetPerYield = 200;
+            int modsSinceYield = 0;
 
             for (int i = 0; i < chain.Count; i++)
             {
@@ -98,41 +388,65 @@ namespace SashaRX.PrefabDoctor
 
                 foreach (var mod in mods)
                 {
-                    if (!IncludeDefaultOverrides && PrefabUtility.IsDefaultOverride(mod))
-                        continue;
+                    ProcessMod(mod, level, map, subtreeRoot);
 
-                    if (mod.target == null)
+                    if (++modsSinceYield >= modBudgetPerYield)
                     {
-                        var orphanKey = new PropertyKey
-                        {
-                            ComponentType = "MISSING",
-                            GameObjectPath = "?",
-                            PropertyPath = mod.propertyPath
-                        };
-                        AddToMap(map, orphanKey, level, mod);
-                        continue;
+                        modsSinceYield = 0;
+                        yield return progress;
                     }
-
-                    if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
-                        continue;
-
-                    // Skip ignored component types
-                    if (mod.target != null && IsIgnoredComponentType(mod.target.GetType().Name))
-                        continue;
-
-                    if (subtreeRoot != null)
-                    {
-                        var targetGO = GetGameObject(mod.target);
-                        if (targetGO != null && !targetGO.transform.IsChildOf(subtreeRoot))
-                            continue;
-                    }
-
-                    var key = MakeKey(mod);
-                    AddToMap(map, key, level, mod);
                 }
             }
+        }
 
-            return map;
+        /// <summary>
+        /// Classify a single <see cref="PropertyModification"/> and add it
+        /// to <paramref name="map"/>. Extracted from the old loop body so
+        /// the incremental collector can reuse it without duplicating the
+        /// orphan / internal / ignored-type filtering rules.
+        /// </summary>
+        private void ProcessMod(
+            PropertyModification mod,
+            NestingLevel level,
+            Dictionary<PropertyKey, List<OverrideEntry>> map,
+            Transform subtreeRoot)
+        {
+            if (!IncludeDefaultOverrides && PrefabUtility.IsDefaultOverride(mod))
+                return;
+
+            if (mod.target == null)
+            {
+                // Orphans from different removed components all have
+                // target == null, so we cannot get a sibling-distinguishing
+                // InstanceID. Leave TargetInstanceId = 0; the formatter's
+                // (depth, value) run-length collapse handles the resulting
+                // duplicates on the display side.
+                var orphanKey = new PropertyKey
+                {
+                    ComponentType = "MISSING",
+                    GameObjectPath = "?",
+                    PropertyPath = mod.propertyPath,
+                    TargetInstanceId = 0
+                };
+                AddToMap(map, orphanKey, level, mod);
+                return;
+            }
+
+            if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
+                return;
+
+            if (IsIgnoredComponentType(mod.target.GetType().Name))
+                return;
+
+            if (subtreeRoot != null)
+            {
+                var targetGO = GetGameObject(mod.target);
+                if (targetGO != null && !targetGO.transform.IsChildOf(subtreeRoot))
+                    return;
+            }
+
+            var key = MakeKey(mod);
+            AddToMap(map, key, level, mod);
         }
 
         private static void AddToMap(Dictionary<PropertyKey, List<OverrideEntry>> map,
@@ -160,6 +474,7 @@ namespace SashaRX.PrefabDoctor
             var sw = Stopwatch.StartNew();
             var report = new AnalysisReport { AnalyzedRoot = root };
 
+            BeginRun();
             try
             {
                 report.Chain = BuildChain(root);
@@ -202,7 +517,7 @@ namespace SashaRX.PrefabDoctor
             }
             finally
             {
-                _soCache.Clear();
+                EndRun();
                 report.AnalysisTimeMs = sw.ElapsedMilliseconds;
             }
 
@@ -217,71 +532,123 @@ namespace SashaRX.PrefabDoctor
         /// Results are merged into a single report with full hierarchy paths.
         /// This is the "full picture" mode — shows every override at every level
         /// for every nested prefab in the entire tree.
+        ///
+        /// Synchronous wrapper around <see cref="AnalyzeHierarchyIncremental"/>
+        /// for callers that do not need cancelation or progress — internally
+        /// this just pumps the enumerator to completion. The editor will
+        /// freeze while it runs; prefer the incremental path from the window.
         /// </summary>
         public AnalysisReport AnalyzeHierarchy(GameObject root)
         {
+            var report = new AnalysisReport();
+            var job = AnalyzeHierarchyIncremental(root, report);
+            while (job.MoveNext()) { /* pump to completion */ }
+            return report;
+        }
+
+        /// <summary>
+        /// Incremental variant of <see cref="AnalyzeHierarchy"/>. Yields a
+        /// float progress in [0..1] after each analyzed PrefabInstance root,
+        /// so the caller can pump it via <c>EditorApplication.update</c> and
+        /// keep the editor responsive. Always yields a final 1f once the
+        /// report is fully populated.
+        ///
+        /// Cancelation: if the caller stops pumping and invokes
+        /// <see cref="AbortRun"/>, the per-run caches (SerializedObject cache,
+        /// ignore snapshot, GO/component caches) are released. Without
+        /// calling AbortRun on a cancelled run those caches leak for the
+        /// rest of the editor session.
+        /// </summary>
+        public IEnumerator<float> AnalyzeHierarchyIncremental(
+            GameObject root, AnalysisReport report)
+        {
             var sw = Stopwatch.StartNew();
-            var report = new AnalysisReport
+            report.AnalyzedRoot = root;
+            report.IsHierarchyMode = true;
+
+            BeginRun();
+
+            // Find all PrefabInstance roots recursively.
+            var instanceRoots = new List<(GameObject go, string hierarchyPath)>();
+            CollectPrefabInstanceRoots(root.transform, "", instanceRoots);
+
+            // Also include the root itself if it's the outermost prefab
+            // instance — otherwise overrides living directly on Level (scene
+            // Position, Game Map script, etc.) would not appear in the report.
+            if (PrefabUtility.IsPartOfPrefabInstance(root))
             {
-                AnalyzedRoot = root,
-                IsHierarchyMode = true
-            };
+                var outerRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(root);
+                if (outerRoot == root)
+                    instanceRoots.Insert(0, (root, root.name));
+            }
 
-            try
+            report.InstancesAnalyzed = instanceRoots.Count;
+            report.Chain = BuildChain(root);
+
+            var goReports = new Dictionary<string, GameObjectReport>();
+            var goPathToRoot = new Dictionary<string, GameObject>();
+            int total = instanceRoots.Count;
+
+            // Chain template cache: many scene instances share the same
+            // prefab asset (e.g. 200× Crate_01). BuildChain is O(depth)
+            // Unity API calls per invocation; caching the template
+            // (depth 1+, which is identical for all instances of the
+            // same prefab) reduces chain-build cost from O(instances ×
+            // depth) to O(unique_prefabs × depth + instances × 1).
+            var chainTemplateCache = new Dictionary<string, List<NestingLevel>>();
+
+            for (int idx = 0; idx < total; idx++)
             {
-                // Find all PrefabInstance roots recursively
-                var instanceRoots = new List<(GameObject go, string hierarchyPath)>();
-                CollectPrefabInstanceRoots(root.transform, "", instanceRoots);
+                var (instanceGO, hierPath) = instanceRoots[idx];
 
-                report.InstancesAnalyzed = instanceRoots.Count;
+                // Build chain for this specific instance.
+                var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(instanceGO);
+                if (instanceRoot == null) instanceRoot = instanceGO;
 
-                // Also include the root itself if it's a prefab instance
-                if (PrefabUtility.IsPartOfPrefabInstance(root))
+                // Record the concrete scene GameObject so the bulk Clean
+                // Orphans action can later call PrefabUtility.SetProperty-
+                // Modifications on it without re-walking the hierarchy.
+                report.HierarchyInstanceRoots.Add(instanceRoot);
+
+                var chain = BuildChainCached(instanceRoot, chainTemplateCache);
+                if (chain.Count >= 2)
                 {
-                    var outerRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(root);
-                    if (outerRoot == root)
-                        instanceRoots.Insert(0, (root, root.name));
-                }
+                    float progress = (float)idx / total;
 
-                // Build a combined chain from the root (for display)
-                report.Chain = BuildChain(root);
+                    // Collect ALL overrides for this instance in one pass
+                    // (no per-mod yielding). The pump in PumpHierarchyJob
+                    // uses a 200ms budget, so mid-instance yields just add
+                    // IEnumerator state-machine overhead without improving
+                    // Cancel responsiveness. We yield once at the instance
+                    // boundary instead.
+                    var overrideMap = new Dictionary<PropertyKey, List<OverrideEntry>>();
+                    CollectOverridesFast(chain, overrideMap);
 
-                var goReports = new Dictionary<string, GameObjectReport>();
-
-                foreach (var (instanceGO, hierPath) in instanceRoots)
-                {
-                    // Build chain for this specific instance
-                    var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(instanceGO);
-                    if (instanceRoot == null) instanceRoot = instanceGO;
-
-                    var chain = BuildChain(instanceRoot);
-                    if (chain.Count < 2) continue;
-
-                    // Collect overrides for this instance
-                    var overrideMap = CollectOverrides(chain);
-
-                    // Classify and merge into report — prefix paths with hierarchy location
+                    // Scalar properties — classify and merge with hier-prefixed paths.
                     foreach (var kvp in overrideMap)
                     {
                         if (ComparerRouter.IsQuaternionComponent(kvp.Key.PropertyPath))
                             continue;
 
-                        // Prefix the GO path with hierarchy path so we know WHERE in the tree
                         var prefixedKey = new PropertyKey
                         {
                             ComponentType = kvp.Key.ComponentType,
                             GameObjectPath = hierPath.Length > 0
                                 ? $"{hierPath}/{kvp.Key.GameObjectPath}"
                                 : kvp.Key.GameObjectPath,
-                            PropertyPath = kvp.Key.PropertyPath
+                            PropertyPath = kvp.Key.PropertyPath,
+                            TargetInstanceId = kvp.Key.TargetInstanceId
                         };
 
                         var conflict = ClassifyConflict(prefixedKey, kvp.Value, chain);
                         if (conflict != null)
+                        {
                             AddConflictToReport(goReports, conflict, report);
+                            goPathToRoot.TryAdd(conflict.Key.GameObjectPath, instanceRoot);
+                        }
                     }
 
-                    // Quaternion groups
+                    // Quaternion groups.
                     var qGroups = GroupQuaternionOverrides(overrideMap);
                     foreach (var qg in qGroups)
                     {
@@ -291,7 +658,8 @@ namespace SashaRX.PrefabDoctor
                             GameObjectPath = hierPath.Length > 0
                                 ? $"{hierPath}/{qg.BaseKey.GameObjectPath}"
                                 : qg.BaseKey.GameObjectPath,
-                            PropertyPath = qg.BaseKey.PropertyPath
+                            PropertyPath = qg.BaseKey.PropertyPath,
+                            TargetInstanceId = qg.BaseKey.TargetInstanceId
                         };
 
                         var prefixedQg = new QuaternionGroup
@@ -303,25 +671,47 @@ namespace SashaRX.PrefabDoctor
 
                         var conflict = ClassifyQuaternionGroup(prefixedQg);
                         if (conflict != null)
+                        {
                             AddConflictToReport(goReports, conflict, report);
+                            goPathToRoot.TryAdd(conflict.Key.GameObjectPath, instanceRoot);
+                        }
                     }
                 }
 
-                report.GameObjects = goReports.Values
-                    .OrderByDescending(g => g.PingPongCount)
-                    .ThenByDescending(g => g.MultiOverrideCount)
-                    .ThenByDescending(g => g.InsignificantCount)
-                    .ToList();
-
-                report.IsComplete = true;
+                // Yield once per instance — the pump's 200ms budget
+                // decides how many instances fit into one tick.
+                yield return total > 0 ? (float)(idx + 1) / total : 1f;
             }
-            finally
+
+            // In-place sort avoids the LINQ OrderByDescending chain which
+            // allocates intermediate arrays — on 8.8M GoReports that chain
+            // triggers multiple GC collections.
+            var goList = new List<GameObjectReport>(goReports.Values);
+            goList.Sort(static (a, b) =>
             {
-                _soCache.Clear();
-                report.AnalysisTimeMs = sw.ElapsedMilliseconds;
-            }
+                int c = b.PingPongCount.CompareTo(a.PingPongCount);
+                if (c != 0) return c;
+                c = b.MultiOverrideCount.CompareTo(a.MultiOverrideCount);
+                if (c != 0) return c;
+                return b.InsignificantCount.CompareTo(a.InsignificantCount);
+            });
+            report.GameObjects = goList;
 
-            return report;
+            report.GoPathToInstanceRoot = goPathToRoot;
+            report.IsComplete = true;
+            EndRun();
+            report.AnalysisTimeMs = sw.ElapsedMilliseconds;
+            yield return 1f;
+        }
+
+        /// <summary>
+        /// Release per-run state (SerializedObject cache, ignore snapshot,
+        /// GO/component caches) without completing an analysis. Call this
+        /// from the pump loop if the user cancels an incremental run.
+        /// </summary>
+        public void AbortRun()
+        {
+            EndRun();
         }
 
         /// <summary>
@@ -356,6 +746,7 @@ namespace SashaRX.PrefabDoctor
             GameObject root, AnalysisReport report, int batchSize = 500)
         {
             var sw = Stopwatch.StartNew();
+            BeginRun();
             report.AnalyzedRoot = root;
             report.Chain = BuildChain(root);
 
@@ -404,7 +795,7 @@ namespace SashaRX.PrefabDoctor
 
             report.IsComplete = true;
             report.AnalysisTimeMs = sw.ElapsedMilliseconds;
-            _soCache.Clear();
+            EndRun();
 
             yield return 1f;
         }
@@ -470,7 +861,12 @@ namespace SashaRX.PrefabDoctor
                     {
                         ComponentType = kvp.Key.compType,
                         GameObjectPath = kvp.Key.goPath,
-                        PropertyPath = "m_LocalRotation [Q]"
+                        PropertyPath = "m_LocalRotation [Q]",
+                        // Quaternion groups are synthetic aggregations of
+                        // four axis mods whose individual TargetInstanceIds
+                        // may differ. Transforms only ever have one rotation
+                        // per GO so collisions are not a concern here.
+                        TargetInstanceId = 0
                     },
                     ValuesByDepth = new Dictionary<int, Quaternion>(),
                     AssetPathsByDepth = paths[kvp.Key]
@@ -515,7 +911,12 @@ namespace SashaRX.PrefabDoctor
 
             if (allSame)
                 return new PropertyConflict
-                    { Key = qg.BaseKey, Severity = ConflictSeverity.Insignificant, Overrides = entries };
+                {
+                    Key = qg.BaseKey,
+                    Severity = ConflictSeverity.Insignificant,
+                    Category = CategorizeProperty(qg.BaseKey.PropertyPath),
+                    Overrides = entries
+                };
 
             // Ping-pong check
             for (int i = 0; i < depths.Count; i++)
@@ -530,15 +931,23 @@ namespace SashaRX.PrefabDoctor
                         if (Mathf.Abs(Quaternion.Dot(qi, qg.ValuesByDepth[depths[k]])) < dotThreshold)
                             return new PropertyConflict
                             {
-                                Key = qg.BaseKey, Severity = ConflictSeverity.PingPong,
-                                Overrides = entries, PingPongIndices = (i, k, j)
+                                Key = qg.BaseKey,
+                                Severity = ConflictSeverity.PingPong,
+                                Category = CategorizeProperty(qg.BaseKey.PropertyPath),
+                                Overrides = entries,
+                                PingPongIndices = (i, k, j)
                             };
                     }
                 }
             }
 
             return new PropertyConflict
-                { Key = qg.BaseKey, Severity = ConflictSeverity.MultiOverride, Overrides = entries };
+            {
+                Key = qg.BaseKey,
+                Severity = ConflictSeverity.MultiOverride,
+                Category = CategorizeProperty(qg.BaseKey.PropertyPath),
+                Overrides = entries
+            };
         }
 
         private static string FmtQ(Quaternion q) =>
@@ -546,10 +955,50 @@ namespace SashaRX.PrefabDoctor
 
         // ── Conflict Classification ────────────────────────────────
 
+        /// <summary>
+        /// Group a property by the kind of data it holds, independently of how
+        /// severe the override is. Used by the UI for per-category filtering
+        /// and status bar summaries.
+        /// </summary>
+        internal static OverrideCategory CategorizeProperty(string propertyPath)
+        {
+            if (string.IsNullOrEmpty(propertyPath)) return OverrideCategory.General;
+
+            // Lightmap noise
+            if (propertyPath == "m_ScaleInLightmap"
+                || propertyPath == "m_LightmapIndex"
+                || propertyPath.StartsWith("m_LightmapTilingOffset"))
+                return OverrideCategory.Lightmap;
+
+            // Network noise (Netcode for GameObjects and similar)
+            if (propertyPath == "WasActiveDuringEdit"
+                || propertyPath == "_initializedTimestamp"
+                || propertyPath == "_networkObjectCache"
+                || propertyPath.Contains("k__BackingField")
+                || propertyPath.StartsWith("NetworkBehaviours"))
+                return OverrideCategory.NetworkNoise;
+
+            if (propertyPath == "m_StaticEditorFlags") return OverrideCategory.StaticFlags;
+            if (propertyPath == "m_Name")              return OverrideCategory.Name;
+
+            if (propertyPath.StartsWith("m_LocalPosition")
+                || propertyPath.StartsWith("m_LocalRotation")
+                || propertyPath.StartsWith("m_LocalScale")
+                || propertyPath.StartsWith("m_LocalEulerAnglesHint"))
+                return OverrideCategory.Transform;
+
+            return OverrideCategory.General;
+        }
+
         private PropertyConflict ClassifyConflict(PropertyKey key,
             List<OverrideEntry> entries, List<NestingLevel> chain)
         {
-            var conflict = new PropertyConflict { Key = key, Overrides = entries };
+            var conflict = new PropertyConflict
+            {
+                Key = key,
+                Overrides = entries,
+                Category = CategorizeProperty(key.PropertyPath)
+            };
 
             if (key.ComponentType == "MISSING")
             {
@@ -559,6 +1008,26 @@ namespace SashaRX.PrefabDoctor
 
             if (entries.Count == 1)
             {
+                // Known-noise categories are always Insignificant without SO.
+                if (conflict.Category == OverrideCategory.NetworkNoise
+                    || conflict.Category == OverrideCategory.Lightmap)
+                {
+                    conflict.Severity = ConflictSeverity.Insignificant;
+                    return conflict;
+                }
+
+                // FastClassify (hierarchy mode): skip the expensive
+                // SerializedObject-based CheckInsignificant. All single-
+                // depth overrides are classified as Insignificant. This
+                // slightly overcounts (a real override with one depth
+                // entry gets marked insignificant instead of null), but
+                // PingPong/Multi/Orphan detection is unaffected.
+                if (FastClassify)
+                {
+                    conflict.Severity = ConflictSeverity.Insignificant;
+                    return conflict;
+                }
+
                 if (CheckInsignificant(key, entries[0], chain))
                 {
                     conflict.Severity = ConflictSeverity.Insignificant;
@@ -589,24 +1058,47 @@ namespace SashaRX.PrefabDoctor
         private (int first, int middle, int pingBack)? DetectPingPong(
             List<OverrideEntry> entries, string propertyPath)
         {
-            if (entries.Count < 2) return null;
+            int n = entries.Count;
+            if (n < 2) return null;
 
-            var sorted = entries.OrderBy(e => e.Depth).ToList();
+            // Build an index array sorted by depth so we can walk entries in
+            // depth order without allocating a second list. Insertion sort is
+            // fine: n is almost always 2-5 (one override per nesting level).
+            // Returning original indices removes the O(n) List.IndexOf scans
+            // the old implementation did on the success path.
+            Span<int> order = n <= 16 ? stackalloc int[n] : new int[n];
+            for (int i = 0; i < n; i++) order[i] = i;
+            for (int i = 1; i < n; i++)
+            {
+                int cur = order[i];
+                int curDepth = entries[cur].Depth;
+                int j = i - 1;
+                while (j >= 0 && entries[order[j]].Depth > curDepth)
+                {
+                    order[j + 1] = order[j];
+                    j--;
+                }
+                order[j + 1] = cur;
+            }
+
             var comparer = ComparerRouter.GetComparer(propertyPath);
 
-            for (int i = 0; i < sorted.Count; i++)
-            for (int j = i + 2; j < sorted.Count; j++)
+            for (int i = 0; i < n; i++)
             {
-                if (!comparer.AreEffectivelyEqual(sorted[i].Value, sorted[j].Value))
-                    continue;
+                int idxI = order[i];
+                string valI = entries[idxI].Value;
 
-                for (int k = i + 1; k < j; k++)
+                for (int j = i + 2; j < n; j++)
                 {
-                    if (!comparer.AreEffectivelyEqual(sorted[k].Value, sorted[i].Value))
+                    int idxJ = order[j];
+                    if (!comparer.AreEffectivelyEqual(valI, entries[idxJ].Value))
+                        continue;
+
+                    for (int k = i + 1; k < j; k++)
                     {
-                        return (entries.IndexOf(sorted[i]),
-                                entries.IndexOf(sorted[k]),
-                                entries.IndexOf(sorted[j]));
+                        int idxK = order[k];
+                        if (!comparer.AreEffectivelyEqual(entries[idxK].Value, valI))
+                            return (idxI, idxK, idxJ);
                     }
                 }
             }
@@ -639,10 +1131,10 @@ namespace SashaRX.PrefabDoctor
             var sourceLevel = chain.FirstOrDefault(l => l.Depth == sourceDepth);
             if (sourceLevel.Root == null) return false;
 
-            var sourceGO = FindGameObjectByPath(sourceLevel.Root, key.GameObjectPath);
+            var sourceGO = GetGameObjectByPathCached(sourceLevel.Root, key.GameObjectPath);
             if (sourceGO == null) return false;
 
-            var sourceObj = FindComponent(sourceGO, key.ComponentType);
+            var sourceObj = GetComponentCached(sourceGO, key.ComponentType);
             if (sourceObj == null) return false;
 
             string sourceValue = ReadPropertyValue(sourceObj, key.PropertyPath);
@@ -650,6 +1142,24 @@ namespace SashaRX.PrefabDoctor
 
             var comparer = ComparerRouter.GetComparer(key.PropertyPath);
             return comparer.AreEffectivelyEqual(entry.Value, sourceValue);
+        }
+
+        private GameObject GetGameObjectByPathCached(GameObject root, string relativePath)
+        {
+            var cacheKey = (root.GetInstanceID(), relativePath);
+            if (_goPathCache.TryGetValue(cacheKey, out var cached)) return cached;
+            var go = FindGameObjectByPath(root, relativePath);
+            _goPathCache[cacheKey] = go;
+            return go;
+        }
+
+        private Object GetComponentCached(GameObject go, string typeName)
+        {
+            var cacheKey = (go.GetInstanceID(), typeName);
+            if (_componentCache.TryGetValue(cacheKey, out var cached)) return cached;
+            var obj = FindComponent(go, typeName);
+            _componentCache[cacheKey] = obj;
+            return obj;
         }
 
         /// <summary>
@@ -764,7 +1274,13 @@ namespace SashaRX.PrefabDoctor
             {
                 ComponentType = mod.target != null ? mod.target.GetType().Name : "Unknown",
                 GameObjectPath = GetRelativePath(mod.target),
-                PropertyPath = mod.propertyPath
+                PropertyPath = mod.propertyPath,
+                // Disambiguate sibling components that share a type name —
+                // e.g. a GameObject hosting multiple NetworkBehaviour
+                // subclasses all reported as the same GetType().Name — so
+                // their parallel overrides don't merge into one bogus
+                // MultiOverride conflict with duplicate same-depth entries.
+                TargetInstanceId = mod.target != null ? mod.target.GetInstanceID() : 0
             };
         }
 
@@ -791,32 +1307,27 @@ namespace SashaRX.PrefabDoctor
             return null;
         }
 
-        private static bool IsInternalProperty(string propertyPath)
+        private bool IsInternalProperty(string propertyPath)
         {
-            foreach (var prefix in s_InternalPrefixes)
-                if (propertyPath.StartsWith(prefix, StringComparison.Ordinal))
-                    return true;
-
-            var settings = PrefabDoctorSettings.GetOrCreateDefault();
-            if (settings.AdditionalIgnoredPrefixes != null)
+            // _runIgnoredPrefixes is the merged static + settings list, built
+            // once per run in BeginRun(). If a caller forgot to BeginRun, fall
+            // back to the static list so we stay correct.
+            var prefixes = _runIgnoredPrefixes ?? s_InternalPrefixes;
+            foreach (var prefix in prefixes)
             {
-                foreach (var prefix in settings.AdditionalIgnoredPrefixes)
-                {
-                    if (!string.IsNullOrEmpty(prefix) &&
-                        propertyPath.StartsWith(prefix, StringComparison.Ordinal))
-                        return true;
-                }
+                if (!string.IsNullOrEmpty(prefix) &&
+                    propertyPath.StartsWith(prefix, StringComparison.Ordinal))
+                    return true;
             }
-
             return false;
         }
 
-        private static bool IsIgnoredComponentType(string typeName)
+        private bool IsIgnoredComponentType(string typeName)
         {
-            var settings = PrefabDoctorSettings.GetOrCreateDefault();
-            if (settings.IgnoredComponentTypes == null) return false;
+            var types = _runIgnoredTypes;
+            if (types == null || types.Length == 0) return false;
 
-            foreach (var ignored in settings.IgnoredComponentTypes)
+            foreach (var ignored in types)
             {
                 if (!string.IsNullOrEmpty(ignored) && typeName == ignored)
                     return true;

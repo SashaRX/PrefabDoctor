@@ -67,8 +67,10 @@ namespace SashaRX.PrefabDoctor
         {
             if (_scanJob == null) return;
 
+            // 200ms budget — same rationale as PumpHierarchyJob. The scan
+            // runs behind a progress bar; 60fps responsiveness is not needed.
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 16)
+            while (sw.ElapsedMilliseconds < 200)
             {
                 if (!_scanJob.MoveNext())
                 {
@@ -150,7 +152,175 @@ namespace SashaRX.PrefabDoctor
                 }
             }
 
+            // Deep bulk cleanup — works on every .prefab in the current
+            // folder scope, with or without a prior scan. This is the
+            // "just clean my whole project" button users reach for after
+            // Unity's Hierarchy right-click Remove Unused Overrides leaves
+            // deep nested orphans behind.
+            GUI.backgroundColor = new Color(1f, 0.75f, 0.3f);
+            if (GUILayout.Button("Clean All Unused", EditorStyles.toolbarButton,
+                    GUILayout.Width(120)))
+            {
+                DoCleanAllUnused();
+            }
+            GUI.backgroundColor = Color.white;
+
+            // Canonical LOD lightmap scale cascade: write 0.5^lodIndex into
+            // every prefab with a LODGroup, then strip stale
+            // m_ScaleInLightmap mods from intermediate variants so the
+            // leaf value is what propagates to scenes. See Task 9 in the
+            // plan file for the full rationale.
+            GUI.backgroundColor = new Color(0.3f, 0.85f, 0.85f);
+            if (GUILayout.Button("Fix LOD Lightmap Scale", EditorStyles.toolbarButton,
+                    GUILayout.Width(150)))
+            {
+                DoNormaliseLodLightmapScale();
+            }
+            GUI.backgroundColor = Color.white;
+
             EditorGUILayout.EndHorizontal();
+        }
+
+        private void DoNormaliseLodLightmapScale()
+        {
+            string scope = _folderScope ?? "Assets";
+
+            // Count prefabs up front — cheap GUID search.
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", new[] { scope });
+            int total = guids.Length;
+            if (total == 0)
+            {
+                EditorUtility.DisplayDialog("Prefab Doctor",
+                    $"No prefab assets found under '{scope}'.", "OK");
+                return;
+            }
+
+            bool confirmed = EditorUtility.DisplayDialog(
+                "Fix LOD Renderer Settings",
+                $"About to normalise LOD renderer settings in {total} prefab files "
+                + $"under '{scope}'.\n\n"
+                + "Phase A — for each LODGroup:\n"
+                + "  • m_ScaleInLightmap cascade: LOD0=1, LOD1=0.5, LOD2=0.25, …\n"
+                + "  • Renderer settings consistency: LOD1+ mirrors LOD0\n"
+                + "    (CastShadows, ReceiveShadows, LightProbeUsage,\n"
+                + "     ReflectionProbeUsage, MotionVectors, etc.)\n\n"
+                + "Phase B — strip every m_ScaleInLightmap PropertyModification "
+                + "from nested PrefabInstance nodes across intermediate prefabs.\n\n"
+                + "This rewrites prefab asset files on disk.\n"
+                + "Recommended: commit the working tree to git first.\n\n"
+                + "Continue?",
+                "Fix",
+                "Cancel");
+
+            if (!confirmed) return;
+
+            int phaseAWrites = 0;
+            int phaseBStripped = 0;
+
+            try
+            {
+                phaseAWrites = ProjectScanActions.NormaliseLodLightmapScaleInScope(
+                    _folderScope,
+                    (i, n, path) =>
+                        EditorUtility.DisplayCancelableProgressBar(
+                            "Prefab Doctor — LOD Cascade (1/2)",
+                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
+                            n > 0 ? (float)i / n : 0f));
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            try
+            {
+                phaseBStripped = ProjectScanActions.StripLodLightmapScaleOverridesInScope(
+                    _folderScope,
+                    (i, n, path) =>
+                        EditorUtility.DisplayCancelableProgressBar(
+                            "Prefab Doctor — Strip Intermediate (2/2)",
+                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
+                            n > 0 ? (float)i / n : 0f));
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            EditorUtility.DisplayDialog(
+                "Prefab Doctor",
+                $"Phase A: normalised {phaseAWrites} renderer properties\n"
+                + "(m_ScaleInLightmap cascade + LOD0→LODn settings sync).\n\n"
+                + $"Phase B: stripped {phaseBStripped} m_ScaleInLightmap "
+                + $"modifications from intermediate prefabs.\n\n"
+                + $"Scope: '{scope}'.\n\n"
+                + "Re-run Scan Project (or hierarchy analysis on your scene) "
+                + "to see the updated state.",
+                "OK");
+
+            if (_report != null && _report.IsComplete)
+                RunScan();
+        }
+
+        private void DoCleanAllUnused()
+        {
+            string scope = _folderScope ?? "Assets";
+
+            // Count prefabs up front so the dialog can show an accurate
+            // total — this is a cheap GUID search, not a full scan.
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", new[] { scope });
+            int total = guids.Length;
+            if (total == 0)
+            {
+                EditorUtility.DisplayDialog("Prefab Doctor",
+                    $"No prefab assets found under '{scope}'.", "OK");
+                return;
+            }
+
+            bool confirmed = EditorUtility.DisplayDialog(
+                "Clean All Unused Overrides",
+                $"About to walk {total} prefab files under '{scope}'.\n\n"
+                + "For each file Prefab Doctor will open it in isolation, "
+                + "collect every nested PrefabInstance, and remove unused "
+                + "overrides via Unity's built-in API (same as the Hierarchy "
+                + "right-click menu, but deep).\n\n"
+                + "This rewrites prefab asset files on disk.\n"
+                + "Recommended: commit the working tree to git first.\n\n"
+                + "Continue?",
+                "Clean",
+                "Cancel");
+
+            if (!confirmed) return;
+
+            int removed = 0;
+            try
+            {
+                removed = ProjectScanActions.CleanAllUnusedOverridesInScope(
+                    _folderScope,
+                    (i, n, path) =>
+                    {
+                        // Returning true cancels the loop.
+                        return EditorUtility.DisplayCancelableProgressBar(
+                            "Prefab Doctor — Clean All Unused",
+                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
+                            n > 0 ? (float)i / n : 0f);
+                    });
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            EditorUtility.DisplayDialog(
+                "Prefab Doctor",
+                $"Removed {removed} unused override modifications across "
+                + $"{total} prefab files under '{scope}'.\n\n"
+                + "Re-run Scan Project to see the updated state.",
+                "OK");
+
+            // Auto-refresh scan if we have a report
+            if (_report != null && _report.IsComplete)
+                RunScan();
         }
 
         // ── Status bar ─────────────────────────────────────────────

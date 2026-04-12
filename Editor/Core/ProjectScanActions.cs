@@ -189,120 +189,574 @@ namespace SashaRX.PrefabDoctor
         // ── Remove Unused Overrides ────────────────────────────────
 
         /// <summary>
-        /// Remove unused overrides from a prefab asset.
-        /// Uses built-in API on 2022.2+, falls back to manual cleanup.
+        /// Remove unused overrides from a prefab asset, including nested
+        /// PrefabInstance children. Opens the prefab in isolation via
+        /// <see cref="PrefabUtility.EditPrefabContentsScope"/>, collects
+        /// every nested instance root, and hands them to Unity's built-in
+        /// <see cref="PrefabUtility.RemoveUnusedOverrides"/> (the same
+        /// path as the Hierarchy right-click menu). Returns the total
+        /// number of modifications removed across all instance roots
+        /// inside the file.
+        ///
+        /// Deep cleanup: a single call reaches orphans at any nesting
+        /// depth. The scope's <c>Dispose</c> re-saves the asset.
         /// </summary>
         public static int RemoveUnusedOverrides(string prefabPath)
         {
-            var prefab = AssetDatabase.LoadMainAssetAtPath(prefabPath) as GameObject;
-            if (prefab == null) return 0;
+            if (string.IsNullOrEmpty(prefabPath)) return 0;
+            if (!prefabPath.EndsWith(".prefab", System.StringComparison.OrdinalIgnoreCase))
+                return 0;
+
+            int total = 0;
+            try
+            {
+                using var scope = new PrefabUtility.EditPrefabContentsScope(prefabPath);
+                var root = scope.prefabContentsRoot;
+                if (root == null) return 0;
+
+                // Pre-clean missing scripts so Dispose can save.
+                int dummy = 0;
+                RemoveMissingScriptsRecursive(root.transform, ref dummy);
+
+                // Collect every nested prefab instance root inside this
+                // loaded prefab. A variant prefab's own root is itself an
+                // instance, so include it too.
+                var instances = new List<GameObject>();
+                if (PrefabUtility.IsAnyPrefabInstanceRoot(root))
+                    instances.Add(root);
+                CollectNestedInstanceRoots(root.transform, instances);
+
+                if (instances.Count == 0) return 0;
 
 #if UNITY_2022_2_OR_NEWER
-            // Use built-in API
-            int beforeCount = CountOverrides(prefab);
-            PrefabUtility.RemoveUnusedOverrides(
-                new[] { prefab }, InteractionMode.AutomatedAction);
-            int afterCount = CountOverrides(prefab);
-            int removed = beforeCount - afterCount;
+                // Unity's built-in deep cleanup — same algorithm as the
+                // Hierarchy right-click "Remove Unused Overrides" menu.
+                int before = 0;
+                for (int i = 0; i < instances.Count; i++) before += CountMods(instances[i]);
 
-            if (removed > 0)
-                Debug.Log($"[Prefab Doctor] Removed {removed} unused overrides from {prefabPath}");
-            return removed;
+                PrefabUtility.RemoveUnusedOverrides(
+                    instances.ToArray(), InteractionMode.AutomatedAction);
+
+                int after = 0;
+                for (int i = 0; i < instances.Count; i++) after += CountMods(instances[i]);
+                total = before - after;
 #else
-            // Manual fallback: remove overrides with invalid property paths
-            return RemoveUnusedOverridesManual(prefab);
+                foreach (var inst in instances)
+                    total += ManualCleanInstance(inst);
 #endif
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError(
+                    $"[Prefab Doctor] Failed to clean {prefabPath}: {ex.Message}");
+                return 0;
+            }
+
+            if (total > 0)
+                Debug.Log($"[Prefab Doctor] Removed {total} unused overrides from {prefabPath}");
+            return total;
         }
 
-        private static int RemoveUnusedOverridesManual(GameObject prefab)
+        /// <summary>
+        /// Recursively walk <paramref name="parent"/>'s children and add every
+        /// GameObject that is a prefab instance root to <paramref name="result"/>.
+        /// </summary>
+        private static void CollectNestedInstanceRoots(
+            Transform parent, List<GameObject> result)
         {
-            var mods = PrefabUtility.GetPropertyModifications(prefab);
-            if (mods == null) return 0;
+            for (int i = 0; i < parent.childCount; i++)
+            {
+                var child = parent.GetChild(i);
+                if (PrefabUtility.IsAnyPrefabInstanceRoot(child.gameObject))
+                    result.Add(child.gameObject);
+                CollectNestedInstanceRoots(child, result);
+            }
+        }
 
-            var keep = new List<PropertyModification>();
+        private static int CountMods(GameObject go)
+        {
+            var mods = PrefabUtility.GetPropertyModifications(go);
+            return mods?.Length ?? 0;
+        }
+
+#if !UNITY_2022_2_OR_NEWER
+        // Manual fallback for Unity < 2022.2 that lacks the public
+        // PrefabUtility.RemoveUnusedOverrides API. Only handles the
+        // target == null case; the 2022.2+ built-in also detects
+        // stale propertyPaths and SerializeReference drift which we
+        // cannot replicate without more SerializedObject gymnastics.
+        private static int ManualCleanInstance(GameObject instance)
+        {
+            var mods = PrefabUtility.GetPropertyModifications(instance);
+            if (mods == null || mods.Length == 0) return 0;
+
+            var keep = new List<PropertyModification>(mods.Length);
             int removed = 0;
-
             foreach (var mod in mods)
             {
-                if (mod.target == null)
-                {
-                    removed++;
-                    continue;
-                }
-
-                // Check if property path is still valid
-                try
-                {
-                    var so = new SerializedObject(mod.target);
-                    var prop = so.FindProperty(mod.propertyPath);
-                    if (prop == null && !PrefabUtility.IsDefaultOverride(mod))
-                    {
-                        removed++;
-                        continue;
-                    }
-                }
-                catch
-                {
-                    removed++;
-                    continue;
-                }
-
+                if (mod.target == null) { removed++; continue; }
                 keep.Add(mod);
             }
 
             if (removed > 0)
-            {
-                PrefabUtility.SetPropertyModifications(prefab, keep.ToArray());
-                Debug.Log($"[Prefab Doctor] Removed {removed} unused overrides (manual) " +
-                          $"from {AssetDatabase.GetAssetPath(prefab)}");
-            }
-
+                PrefabUtility.SetPropertyModifications(instance, keep.ToArray());
             return removed;
         }
+#endif
 
         /// <summary>
-        /// Batch remove unused overrides from multiple prefabs.
+        /// Batch remove unused overrides from multiple prefabs. Uses
+        /// <see cref="AssetDatabase.StartAssetEditing"/> so all writes are
+        /// grouped into one refresh.
         /// </summary>
         public static int BatchRemoveUnusedOverrides(IEnumerable<string> prefabPaths)
         {
+            if (prefabPaths == null) return 0;
+
             int total = 0;
+            int processed = 0;
 
-#if UNITY_2022_2_OR_NEWER
-            // Built-in batch API
-            var roots = new List<GameObject>();
-            foreach (var path in prefabPaths)
-            {
-                var prefab = AssetDatabase.LoadMainAssetAtPath(path) as GameObject;
-                if (prefab != null) roots.Add(prefab);
-            }
-
-            if (roots.Count > 0)
-            {
-                int before = roots.Sum(CountOverrides);
-                PrefabUtility.RemoveUnusedOverrides(
-                    roots.ToArray(), InteractionMode.AutomatedAction);
-                int after = roots.Sum(CountOverrides);
-                total = before - after;
-            }
-#else
             AssetDatabase.StartAssetEditing();
             try
             {
                 foreach (var path in prefabPaths)
+                {
                     total += RemoveUnusedOverrides(path);
+                    processed++;
+                }
             }
             finally
             {
                 AssetDatabase.StopAssetEditing();
+                AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
             }
-#endif
 
-            if (total > 0)
-                Debug.Log($"[Prefab Doctor] Batch removed {total} unused overrides " +
-                          $"from {prefabPaths.Count()} prefabs");
-
+            Debug.Log(
+                $"[Prefab Doctor] Batch cleanup: processed {processed} prefab files, "
+                + $"removed {total} unused override modifications total");
             return total;
+        }
+
+        /// <summary>
+        /// Batch remove unused overrides from every prefab asset under the
+        /// given folder (or "Assets" if null). Uses AssetDatabase to find
+        /// paths, then calls <see cref="BatchRemoveUnusedOverrides"/> with
+        /// an optional progress callback so the caller can drive a
+        /// cancelable progress bar.
+        /// </summary>
+        public static int CleanAllUnusedOverridesInScope(
+            string folderScope,
+            System.Func<int, int, string, bool> onProgress = null)
+        {
+            string[] searchFolders = string.IsNullOrEmpty(folderScope)
+                ? new[] { "Assets" }
+                : new[] { folderScope };
+
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", searchFolders);
+            if (guids.Length == 0) return 0;
+
+            int total = 0;
+            int processed = 0;
+            bool cancelled = false;
+
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                for (int i = 0; i < guids.Length; i++)
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guids[i]);
+
+                    if (onProgress != null && onProgress(i, guids.Length, path))
+                    {
+                        cancelled = true;
+                        break;
+                    }
+
+                    total += RemoveUnusedOverrides(path);
+                    processed++;
+                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+            }
+
+            Debug.Log(
+                $"[Prefab Doctor] Scope cleanup ({folderScope ?? "Assets"}): "
+                + $"{(cancelled ? "cancelled after " : "processed ")}"
+                + $"{processed} / {guids.Length} prefab files, "
+                + $"removed {total} unused override modifications total");
+            return total;
+        }
+
+        // ── LOD Renderer Settings Canonicalisation ─────────────────
+
+        /// <summary>
+        /// Renderer properties that should be identical across all LOD
+        /// levels. LOD0 is the reference — its first renderer's values are
+        /// copied to every renderer in LOD1 and up. <c>m_ScaleInLightmap</c>
+        /// is NOT in this list because it uses the deterministic
+        /// <c>0.5^lodIndex</c> cascade instead of a flat copy.
+        /// </summary>
+        private static readonly string[] s_RendererSettingsToSync =
+        {
+            "m_CastShadows",
+            "m_ReceiveShadows",
+            "m_StaticShadowCaster",
+            "m_DynamicOccludee",
+            "m_LightProbeUsage",
+            "m_ReflectionProbeUsage",
+            "m_MotionVectors",
+            "m_RenderingLayerMask",
+            "m_RayTracingMode",
+        };
+
+        /// <summary>
+        /// Phase A of the LOD lightmap scale fix: walk every .prefab under
+        /// <paramref name="folderScope"/>, find every <see cref="LODGroup"/>
+        /// inside it, and:
+        /// <list type="number">
+        ///   <item>Write the canonical cascade <c>scale = 0.5 ^ lodIndex</c>
+        ///   onto each LOD's renderers' <c>m_ScaleInLightmap</c>.</item>
+        ///   <item>Copy LOD0's renderer settings
+        ///   (<see cref="s_RendererSettingsToSync"/>) to every renderer in
+        ///   LOD1+, ensuring consistency across LOD levels.</item>
+        /// </list>
+        /// Idempotent: already-correct values are left alone so reruns are
+        /// near-free and file hashes stable.
+        ///
+        /// Pairs with <see cref="StripLodLightmapScaleOverridesInScope"/>
+        /// (Phase B) — run that afterwards to drop stale intermediate
+        /// PropertyModifications that shadow the new canonical value.
+        /// Returns the total number of renderer property writes.
+        /// </summary>
+        public static int NormaliseLodLightmapScaleInScope(
+            string folderScope,
+            System.Func<int, int, string, bool> onProgress = null)
+        {
+            string[] searchFolders = string.IsNullOrEmpty(folderScope)
+                ? new[] { "Assets" }
+                : new[] { folderScope };
+
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", searchFolders);
+            if (guids.Length == 0) return 0;
+
+            int totalWrites = 0;
+            int touchedPrefabs = 0;
+            int processed = 0;
+            bool cancelled = false;
+
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                for (int i = 0; i < guids.Length; i++)
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guids[i]);
+
+                    if (onProgress != null && onProgress(i, guids.Length, path))
+                    {
+                        cancelled = true;
+                        break;
+                    }
+
+                    int writes = NormaliseLodLightmapScaleInFile(path);
+                    if (writes > 0)
+                    {
+                        totalWrites += writes;
+                        touchedPrefabs++;
+                    }
+                    processed++;
+                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+            }
+
+            Debug.Log(
+                $"[Prefab Doctor] LOD cascade ({folderScope ?? "Assets"}): "
+                + $"{(cancelled ? "cancelled after " : "processed ")}"
+                + $"{processed} / {guids.Length} prefab files, "
+                + $"wrote {totalWrites} renderer scales in {touchedPrefabs} prefabs");
+            return totalWrites;
+        }
+
+        private static int NormaliseLodLightmapScaleInFile(string prefabPath)
+        {
+            if (string.IsNullOrEmpty(prefabPath)) return 0;
+            if (!prefabPath.EndsWith(".prefab", System.StringComparison.OrdinalIgnoreCase))
+                return 0;
+
+            int writes = 0;
+            try
+            {
+                using var scope = new PrefabUtility.EditPrefabContentsScope(prefabPath);
+                var root = scope.prefabContentsRoot;
+                if (root == null) return 0;
+
+                // Pre-clean missing scripts so the scope's Dispose can save
+                // the file. Prefabs with missing scripts cause Unity to abort
+                // SaveAsPrefabAsset — stripping them first unblocks both the
+                // LOD normalisation AND the subsequent re-save.
+                RemoveMissingScriptsRecursive(root.transform, ref writes);
+
+                var groups = root.GetComponentsInChildren<LODGroup>(true);
+                if (groups == null || groups.Length == 0) return writes;
+
+                foreach (var group in groups)
+                {
+                    if (group == null) continue;
+                    var lods = group.GetLODs();
+                    if (lods == null || lods.Length == 0) continue;
+
+                    // Collect LOD0's reference renderer settings. LOD0 is the
+                    // highest-quality mesh whose settings the artist authored
+                    // intentionally; LOD1+ should mirror them for consistency.
+                    Dictionary<string, SerializedPropertyValue> lod0Settings = null;
+                    var lod0Renderers = lods[0].renderers;
+                    if (lod0Renderers != null && lod0Renderers.Length > 0)
+                    {
+                        var refRenderer = lod0Renderers[0];
+                        if (refRenderer != null)
+                            lod0Settings = ReadRendererSettings(refRenderer);
+                    }
+
+                    for (int lodIndex = 0; lodIndex < lods.Length; lodIndex++)
+                    {
+                        float canonical = Mathf.Pow(0.5f, lodIndex);
+                        var renderers = lods[lodIndex].renderers;
+                        if (renderers == null) continue;
+
+                        foreach (var renderer in renderers)
+                        {
+                            if (renderer == null) continue;
+
+                            using var so = new SerializedObject(renderer);
+                            bool dirty = false;
+
+                            // Scale cascade: m_ScaleInLightmap = 0.5^lodIndex
+                            var scaleProp = so.FindProperty("m_ScaleInLightmap");
+                            if (scaleProp != null &&
+                                !Mathf.Approximately(scaleProp.floatValue, canonical))
+                            {
+                                scaleProp.floatValue = canonical;
+                                dirty = true;
+                            }
+
+                            // Renderer settings consistency: LOD1+ must match
+                            // LOD0's reference renderer (CastShadows,
+                            // ReceiveShadows, LightProbeUsage, etc.).
+                            if (lodIndex > 0 && lod0Settings != null)
+                            {
+                                foreach (var kvp in lod0Settings)
+                                {
+                                    var prop = so.FindProperty(kvp.Key);
+                                    if (prop == null) continue;
+                                    if (SetPropertyIfDifferent(prop, kvp.Value))
+                                        dirty = true;
+                                }
+                            }
+
+                            if (dirty)
+                            {
+                                so.ApplyModifiedPropertiesWithoutUndo();
+                                writes++;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError(
+                    $"[Prefab Doctor] LOD normalisation failed on {prefabPath}: {ex.Message}");
+                return 0;
+            }
+
+            return writes;
+        }
+
+        /// <summary>
+        /// Snapshot of a serialised property value — enough to compare and
+        /// write back via <see cref="SetPropertyIfDifferent"/>.
+        /// </summary>
+        private readonly struct SerializedPropertyValue
+        {
+            public readonly SerializedPropertyType Type;
+            public readonly float FloatVal;
+            public readonly int IntVal;
+            public readonly bool BoolVal;
+
+            public SerializedPropertyValue(SerializedProperty prop)
+            {
+                Type = prop.propertyType;
+                FloatVal = Type == SerializedPropertyType.Float ? prop.floatValue : 0f;
+                IntVal = Type == SerializedPropertyType.Integer
+                    || Type == SerializedPropertyType.Enum
+                        ? prop.intValue : 0;
+                BoolVal = Type == SerializedPropertyType.Boolean && prop.boolValue;
+            }
+        }
+
+        private static Dictionary<string, SerializedPropertyValue> ReadRendererSettings(
+            Renderer renderer)
+        {
+            var result = new Dictionary<string, SerializedPropertyValue>(
+                s_RendererSettingsToSync.Length);
+
+            using var so = new SerializedObject(renderer);
+            foreach (string name in s_RendererSettingsToSync)
+            {
+                var prop = so.FindProperty(name);
+                if (prop == null) continue;
+                result[name] = new SerializedPropertyValue(prop);
+            }
+
+            return result;
+        }
+
+        private static bool SetPropertyIfDifferent(SerializedProperty prop,
+            in SerializedPropertyValue reference)
+        {
+            switch (reference.Type)
+            {
+                case SerializedPropertyType.Float:
+                    if (Mathf.Approximately(prop.floatValue, reference.FloatVal)) return false;
+                    prop.floatValue = reference.FloatVal;
+                    return true;
+
+                case SerializedPropertyType.Integer:
+                case SerializedPropertyType.Enum:
+                    if (prop.intValue == reference.IntVal) return false;
+                    prop.intValue = reference.IntVal;
+                    return true;
+
+                case SerializedPropertyType.Boolean:
+                    if (prop.boolValue == reference.BoolVal) return false;
+                    prop.boolValue = reference.BoolVal;
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// Phase B of the LOD lightmap scale fix: walk every .prefab under
+        /// <paramref name="folderScope"/>, open it in isolation, and strip
+        /// every <c>m_ScaleInLightmap</c> PropertyModification from its
+        /// nested prefab instances. This flushes stale intermediate-level
+        /// overrides so variant-chain consumers resolve straight to the
+        /// leaf prefab's newly-canonicalised cascade.
+        ///
+        /// Pairs with <see cref="NormaliseLodLightmapScaleInScope"/>
+        /// (Phase A). Returns the total number of stripped modifications.
+        /// </summary>
+        public static int StripLodLightmapScaleOverridesInScope(
+            string folderScope,
+            System.Func<int, int, string, bool> onProgress = null)
+        {
+            string[] searchFolders = string.IsNullOrEmpty(folderScope)
+                ? new[] { "Assets" }
+                : new[] { folderScope };
+
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", searchFolders);
+            if (guids.Length == 0) return 0;
+
+            int totalStripped = 0;
+            int touchedPrefabs = 0;
+            int processed = 0;
+            bool cancelled = false;
+
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                for (int i = 0; i < guids.Length; i++)
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guids[i]);
+
+                    if (onProgress != null && onProgress(i, guids.Length, path))
+                    {
+                        cancelled = true;
+                        break;
+                    }
+
+                    int stripped = StripLodLightmapScaleOverridesInFile(path);
+                    if (stripped > 0)
+                    {
+                        totalStripped += stripped;
+                        touchedPrefabs++;
+                    }
+                    processed++;
+                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+            }
+
+            Debug.Log(
+                $"[Prefab Doctor] LOD strip ({folderScope ?? "Assets"}): "
+                + $"{(cancelled ? "cancelled after " : "processed ")}"
+                + $"{processed} / {guids.Length} prefab files, "
+                + $"stripped {totalStripped} m_ScaleInLightmap modifications in {touchedPrefabs} prefabs");
+            return totalStripped;
+        }
+
+        private static int StripLodLightmapScaleOverridesInFile(string prefabPath)
+        {
+            if (string.IsNullOrEmpty(prefabPath)) return 0;
+            if (!prefabPath.EndsWith(".prefab", System.StringComparison.OrdinalIgnoreCase))
+                return 0;
+
+            int stripped = 0;
+            try
+            {
+                using var scope = new PrefabUtility.EditPrefabContentsScope(prefabPath);
+                var root = scope.prefabContentsRoot;
+                if (root == null) return 0;
+
+                // Pre-clean missing scripts so Dispose can save.
+                int dummy = 0;
+                RemoveMissingScriptsRecursive(root.transform, ref dummy);
+
+                var instances = new List<GameObject>();
+                if (PrefabUtility.IsAnyPrefabInstanceRoot(root))
+                    instances.Add(root);
+                CollectNestedInstanceRoots(root.transform, instances);
+
+                foreach (var instance in instances)
+                {
+                    if (instance == null) continue;
+
+                    var mods = PrefabUtility.GetPropertyModifications(instance);
+                    if (mods == null || mods.Length == 0) continue;
+
+                    int before = mods.Length;
+                    var keep = mods.Where(m =>
+                        m == null || m.propertyPath != "m_ScaleInLightmap").ToArray();
+                    int removed = before - keep.Length;
+                    if (removed == 0) continue;
+
+                    PrefabUtility.SetPropertyModifications(instance, keep);
+                    stripped += removed;
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError(
+                    $"[Prefab Doctor] LOD strip failed on {prefabPath}: {ex.Message}");
+                return 0;
+            }
+
+            return stripped;
         }
 
         // ── Helpers ────────────────────────────────────────────────
