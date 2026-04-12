@@ -67,8 +67,10 @@ namespace SashaRX.PrefabDoctor
         {
             if (_scanJob == null) return;
 
+            // 200ms budget — same rationale as PumpHierarchyJob. The scan
+            // runs behind a progress bar; 60fps responsiveness is not needed.
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 16)
+            while (sw.ElapsedMilliseconds < 200)
             {
                 if (!_scanJob.MoveNext())
                 {

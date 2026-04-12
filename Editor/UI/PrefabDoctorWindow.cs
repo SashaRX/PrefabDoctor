@@ -1920,7 +1920,6 @@ namespace SashaRX.PrefabDoctor
         {
             if (!_scanPanel.IsScanning) return;
             _scanPanel.PumpScanJob();
-            Repaint();
         }
 
         private List<GameObjectReport> GetFilteredGameObjects()
