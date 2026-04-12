@@ -280,9 +280,7 @@ namespace SashaRX.PrefabDoctor
             _scanTab = new VisualElement();
             _scanTab.style.flexGrow = 1;
             _scanTab.style.display = DisplayStyle.None;
-            var scanImgui = new IMGUIContainer(() => _scanPanel.OnGUI());
-            scanImgui.style.flexGrow = 1;
-            _scanTab.Add(scanImgui);
+            _scanTab.Add(_scanPanel.BuildRoot());
             root.Add(_scanTab);
 
             // Initial state sync
