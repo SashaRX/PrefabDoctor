@@ -294,12 +294,20 @@ namespace SashaRX.PrefabDoctor
 
             if (_emptyStateLabel == null) return;
 
-            if (_incrementalJob != null || _hierarchyJob != null || _depScanJob != null)
+            if (_incrementalJob != null)
             {
+                // Instance-mode incremental: show inline progress (no modal dialog).
                 _emptyStateLabel.text = "Analyzing…";
                 SetDisplay(_emptyStateProgress, true);
                 _emptyStateProgress.value = _progress * 100f;
                 _emptyStateProgress.title = $"{_progress * 100f:F0}%";
+            }
+            else if (_hierarchyJob != null || _depScanJob != null)
+            {
+                // Hierarchy + dependency scan use modal DisplayCancelableProgressBar,
+                // so just show a short label — no inline progress bar needed.
+                _emptyStateLabel.text = "Analyzing…";
+                SetDisplay(_emptyStateProgress, false);
             }
             else if (_target == null)
             {
