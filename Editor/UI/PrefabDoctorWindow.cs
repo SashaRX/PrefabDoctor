@@ -500,13 +500,6 @@ namespace SashaRX.PrefabDoctor
             { text = "Copy Report" };
             toolbar.Add(_copyReportButton);
 
-            var lodBtn = new ToolbarButton(OnFixLodLightmapClicked)
-            { text = "Fix LOD Lightmap" };
-            lodBtn.tooltip = "Normalise LOD lightmap cascade (0.5^lodIndex) across all prefabs, "
-                + "then strip intermediate m_ScaleInLightmap overrides.";
-            lodBtn.style.color = new Color(0.3f, 0.85f, 0.85f);
-            toolbar.Add(lodBtn);
-
             return toolbar;
         }
 
@@ -1930,68 +1923,6 @@ namespace SashaRX.PrefabDoctor
             // in the left panel and handles both single prefabs and full
             // scene trees correctly.
             RunHierarchyAnalysis();
-        }
-
-        private void OnFixLodLightmapClicked()
-        {
-            string scope = "Assets";
-
-            string[] guids = AssetDatabase.FindAssets("t:Prefab", new[] { scope });
-            if (guids.Length == 0)
-            {
-                EditorUtility.DisplayDialog("Prefab Doctor",
-                    "No prefab assets found.", "OK");
-                return;
-            }
-
-            bool confirmed = EditorUtility.DisplayDialog(
-                "Fix LOD Lightmap Scale",
-                $"About to normalise LOD renderer settings in {guids.Length} prefab files.\n\n"
-                + "Phase A — m_ScaleInLightmap cascade: LOD0=1, LOD1=0.5, LOD2=0.25, …\n"
-                + "         + LOD0→LODn renderer settings sync.\n\n"
-                + "Phase B — strip intermediate m_ScaleInLightmap overrides.\n\n"
-                + "This rewrites prefab files on disk.\n"
-                + "Recommended: commit to git first.\n\n"
-                + "Continue?",
-                "Fix", "Cancel");
-
-            if (!confirmed) return;
-
-            int phaseAWrites = 0;
-            int phaseBStripped = 0;
-
-            try
-            {
-                phaseAWrites = ProjectScanActions.NormaliseLodLightmapScaleInScope(
-                    null,
-                    (i, n, path) =>
-                        EditorUtility.DisplayCancelableProgressBar(
-                            "Prefab Doctor — LOD Cascade (1/2)",
-                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
-                            n > 0 ? (float)i / n : 0f));
-            }
-            finally { EditorUtility.ClearProgressBar(); }
-
-            try
-            {
-                phaseBStripped = ProjectScanActions.StripLodLightmapScaleOverridesInScope(
-                    null,
-                    (i, n, path) =>
-                        EditorUtility.DisplayCancelableProgressBar(
-                            "Prefab Doctor — Strip Intermediate (2/2)",
-                            $"{i + 1} / {n}  {System.IO.Path.GetFileName(path)}",
-                            n > 0 ? (float)i / n : 0f));
-            }
-            finally { EditorUtility.ClearProgressBar(); }
-
-            EditorUtility.DisplayDialog(
-                "Prefab Doctor",
-                $"Phase A: normalised {phaseAWrites} renderer properties.\n"
-                + $"Phase B: stripped {phaseBStripped} m_ScaleInLightmap modifications.\n\n"
-                + "Re-run Analyze to see the updated state.",
-                "OK");
-
-            RunUnifiedAnalysis();
         }
 
         private Transform _subtreeRoot;
