@@ -998,7 +998,7 @@ namespace SashaRX.PrefabDoctor
         /// </summary>
         private GameObject ResolveByRelativePath(string path)
         {
-            if (string.IsNullOrEmpty(path) || path == "?") return null;
+            if (string.IsNullOrEmpty(path) || path == "(orphaned)") return null;
 
             // Fast path: resolve via _target if its name matches the root.
             if (_target != null)

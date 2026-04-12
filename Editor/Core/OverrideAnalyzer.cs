@@ -330,7 +330,7 @@ namespace SashaRX.PrefabDoctor
                 var orphanKey = new PropertyKey
                 {
                     ComponentType = "MISSING",
-                    GameObjectPath = "?",
+                    GameObjectPath = "(orphaned)",
                     PropertyPath = mod.propertyPath,
                     TargetInstanceId = 0
                 };
@@ -432,7 +432,7 @@ namespace SashaRX.PrefabDoctor
                 var orphanKey = new PropertyKey
                 {
                     ComponentType = "MISSING",
-                    GameObjectPath = "?",
+                    GameObjectPath = "(orphaned)",
                     PropertyPath = mod.propertyPath,
                     TargetInstanceId = 0
                 };
