@@ -829,19 +829,12 @@ namespace SashaRX.PrefabDoctor
 
             if (!_autoPing || idx < 0) return;
 
-            // Hierarchy mode: ping the source prefab asset
+            // Hierarchy mode: selecting a prefab type group — no ping
+            // (it's an asset type, not a specific scene instance).
+            // Ping happens when clicking a ROW in the right panel.
             if (_report != null && _report.IsHierarchyMode
                 && _prefabGroups != null && idx < _prefabGroups.Count)
-            {
-                var group = _prefabGroups[idx];
-                var obj = AssetDatabase.LoadMainAssetAtPath(group.AssetPath);
-                if (obj != null)
-                {
-                    EditorGUIUtility.PingObject(obj);
-                    Selection.activeObject = obj;
-                }
                 return;
-            }
 
             // Instance mode: ping the scene object
             var filtered = GetFilteredGameObjects();
@@ -938,14 +931,7 @@ namespace SashaRX.PrefabDoctor
 
             // Sort: worst first
             _prefabGroups.Sort(static (a, b) =>
-            {
-                int c = b.PingPongCount.CompareTo(a.PingPongCount);
-                if (c != 0) return c;
-                c = b.MultiOverrideCount.CompareTo(a.MultiOverrideCount);
-                if (c != 0) return c;
-                c = b.TotalConflicts.CompareTo(a.TotalConflicts);
-                return c != 0 ? c : string.Compare(a.DisplayName, b.DisplayName, StringComparison.Ordinal);
-            });
+                string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase));
         }
 
         // ── Empty state (UI Toolkit) ───────────────────────────────
