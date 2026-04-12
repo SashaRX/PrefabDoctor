@@ -1,0 +1,30 @@
+# {{Display Name}}
+
+{{Описание пакета.}}
+
+## Установка
+
+### Через Git URL (Unity Package Manager)
+
+1. Откройте **Window → Package Manager**
+2. Нажмите **+** → **Add package from git URL**
+3. Вставьте: `https://github.com/{{author}}/{{repo}}.git`
+
+### Через диск
+
+1. Скачайте или клонируйте репозиторий
+2. Откройте **Window → Package Manager**
+3. Нажмите **+** → **Add package from disk**
+4. Выберите файл `package.json`
+
+## Использование
+
+_Описать основной workflow._
+
+## Требования
+
+- Unity {{unity_version}} или новее
+
+## Лицензия
+
+MIT — см. [LICENSE](LICENSE)
