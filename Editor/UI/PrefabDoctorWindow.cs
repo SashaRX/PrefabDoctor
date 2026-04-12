@@ -828,7 +828,23 @@ namespace SashaRX.PrefabDoctor
                 if (idx >= 0 && idx < filtered.Count)
                 {
                     var goReport = filtered[idx];
+                    // Try direct path resolution first (works in instance mode).
                     var sceneGO = ResolveByRelativePath(goReport.RelativePath);
+
+                    // Fallback for hierarchy mode: hierPath-prefixed paths
+                    // don't start with the root's name, so ResolveByRelativePath
+                    // fails. Use GoPathToInstanceRoot to get the PrefabInstance
+                    // root, which IS a valid scene object we can ping.
+                    if (sceneGO == null
+                        && _report != null
+                        && _report.GoPathToInstanceRoot != null
+                        && _report.GoPathToInstanceRoot.TryGetValue(
+                            goReport.RelativePath, out var instanceRoot)
+                        && instanceRoot != null)
+                    {
+                        sceneGO = instanceRoot;
+                    }
+
                     if (sceneGO != null)
                     {
                         EditorGUIUtility.PingObject(sceneGO);
@@ -1614,7 +1630,12 @@ namespace SashaRX.PrefabDoctor
                     $"Keep only at D{capturedDepth} ({name}) = {capturedValue}",
                     _ =>
                     {
-                        OverrideActions.KeepOnlyAtDepth(_target, conflict, capturedDepth);
+                        // Resolve via GoPathToInstanceRoot so hierarchy mode
+                        // uses the correct nested PrefabInstance root, not
+                        // _target (which is the scene root Level).
+                        var keepTasks = ResolveBatchTasks(new[] { row.Handle }).ToList();
+                        var keepRoot = keepTasks.Count > 0 ? keepTasks[0].instanceRoot : _target;
+                        OverrideActions.KeepOnlyAtDepth(keepRoot, conflict, capturedDepth);
                         if (_report != null && _report.IsHierarchyMode) RunHierarchyAnalysis();
                         else RunAnalysis();
                     });
