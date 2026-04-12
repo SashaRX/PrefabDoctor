@@ -1098,8 +1098,14 @@ namespace SashaRX.PrefabDoctor
             compCol.bindCell = BindCompCell;
             columns.Add(compCol);
 
+            var pathCol = new Column { name = "path", title = "Object", stretchable = false };
+            pathCol.width = 160f;
+            pathCol.makeCell = MakeLabelCell;
+            pathCol.bindCell = BindPathCell;
+            columns.Add(pathCol);
+
             var propCol = new Column { name = "prop", title = "Property", stretchable = false };
-            propCol.width = 240f;
+            propCol.width = 200f;
             propCol.makeCell = MakeLabelCell;
             propCol.bindCell = BindPropCell;
             columns.Add(propCol);
@@ -1354,6 +1360,22 @@ namespace SashaRX.PrefabDoctor
             lbl.userData = index;
             lbl.text = row.Conflict.Key.ComponentType;
             lbl.style.color = new Color(0.85f, 0.85f, 0.85f);
+            lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
+        }
+
+        private void BindPathCell(VisualElement element, int index)
+        {
+            var lbl = (Label)element;
+            if (index < 0 || index >= _conflictRows.Count) { lbl.text = ""; return; }
+            var row = _conflictRows[index];
+            lbl.userData = index;
+            // Show last segment of the GO path within the selected report entry
+            // so the user can distinguish which child has this override.
+            string goPath = row.Conflict.Key.GameObjectPath;
+            int slash = goPath.LastIndexOf('/');
+            lbl.text = slash >= 0 ? goPath[(slash + 1)..] : goPath;
+            lbl.tooltip = goPath;
+            lbl.style.color = new Color(0.7f, 0.8f, 0.9f);
             lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
         }
 
