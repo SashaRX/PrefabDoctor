@@ -1425,10 +1425,37 @@ namespace SashaRX.PrefabDoctor
             var filtered = GetFilteredGameObjects();
             if (_selectedGoIndex >= filtered.Count) return;
             var go = filtered[_selectedGoIndex];
-            if (go.Instance != null)
+            PingSceneObject(go.RelativePath);
+        }
+
+        /// <summary>
+        /// Resolve a conflict's GameObjectPath to a scene object and ping it.
+        /// Walks the path from the analyzed root or uses GoPathToInstanceRoot.
+        /// </summary>
+        private void PingConflictObject(PropertyConflict conflict)
+        {
+            PingSceneObject(conflict.Key.GameObjectPath);
+        }
+
+        private void PingSceneObject(string relativePath)
+        {
+            if (string.IsNullOrEmpty(relativePath) || relativePath == "(orphaned)") return;
+
+            var sceneGO = ResolveByRelativePath(relativePath);
+
+            if (sceneGO == null && _report?.GoPathToInstanceRoot != null
+                && _report.GoPathToInstanceRoot.TryGetValue(relativePath, out var instanceRoot)
+                && instanceRoot != null)
             {
-                EditorGUIUtility.PingObject(go.Instance);
-                Selection.activeGameObject = go.Instance;
+                // Try to resolve deeper: the conflict path may be a child
+                // of the instance root.
+                sceneGO = instanceRoot;
+            }
+
+            if (sceneGO != null)
+            {
+                EditorGUIUtility.PingObject(sceneGO);
+                Selection.activeGameObject = sceneGO;
             }
         }
 
@@ -1591,11 +1618,19 @@ namespace SashaRX.PrefabDoctor
 
             _selectedConflicts.RemoveWhere(h => h.GoReportIndex == canonicalGoIndex);
 
+            int lastSelectedRow = -1;
             foreach (int rowIdx in _conflictListView.selectedIndices)
             {
                 if (rowIdx >= 0 && rowIdx < _conflictRows.Count)
+                {
                     _selectedConflicts.Add(_conflictRows[rowIdx].Handle);
+                    lastSelectedRow = rowIdx;
+                }
             }
+
+            // Ping the scene object for the last selected conflict row
+            if (_autoPing && lastSelectedRow >= 0 && lastSelectedRow < _conflictRows.Count)
+                PingConflictObject(_conflictRows[lastSelectedRow].Conflict);
 
             UpdateBatchBar();
         }
@@ -1846,6 +1881,13 @@ namespace SashaRX.PrefabDoctor
 
             var row = _conflictRows[rowIdx];
             var conflict = row.Conflict;
+
+            evt.menu.AppendAction("Ping in Scene", _ =>
+            {
+                PingConflictObject(conflict);
+            });
+
+            evt.menu.AppendSeparator();
 
             evt.menu.AppendAction("Revert All (return to base)", _ =>
             {
