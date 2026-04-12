@@ -958,16 +958,11 @@ namespace SashaRX.PrefabDoctor
             panel.style.flexGrow = 1;
             panel.style.flexDirection = FlexDirection.Column;
 
-            // ── Conflict view (shown when override GO is selected) ──
-            _conflictContainer = new VisualElement();
-            _conflictContainer.style.flexGrow = 1;
-            _conflictContainer.style.flexDirection = FlexDirection.Column;
-
             _conflictHeader = BuildConflictHeader();
-            _conflictContainer.Add(_conflictHeader);
+            panel.Add(_conflictHeader);
 
             _batchBar = BuildBatchBar();
-            _conflictContainer.Add(_batchBar);
+            panel.Add(_batchBar);
 
             var columns = new Columns();
 
@@ -1023,160 +1018,9 @@ namespace SashaRX.PrefabDoctor
             };
             _conflictListView.style.flexGrow = 1;
             _conflictListView.selectionChanged += OnConflictListSelectionChanged;
-            _conflictContainer.Add(_conflictListView);
-
-            panel.Add(_conflictContainer);
-
-            // ── Health detail view (shown when asset health item is selected) ──
-            _healthDetailContainer = new VisualElement();
-            _healthDetailContainer.style.flexGrow = 1;
-            _healthDetailContainer.style.flexDirection = FlexDirection.Column;
-            _healthDetailContainer.style.display = DisplayStyle.None;
-
-            // Action bar: Ping, Open Prefab, Fix action
-            _healthActionBar = new VisualElement();
-            _healthActionBar.style.flexDirection = FlexDirection.Row;
-            _healthActionBar.style.flexShrink = 0;
-            _healthActionBar.style.paddingTop = 4;
-            _healthActionBar.style.paddingBottom = 4;
-            _healthActionBar.style.paddingLeft = 8;
-            _healthActionBar.style.paddingRight = 8;
-            _healthActionBar.style.borderBottomWidth = 1;
-            _healthActionBar.style.borderBottomColor = new Color(0, 0, 0, 0.3f);
-            _healthDetailContainer.Add(_healthActionBar);
-
-            _healthDetailLabel = new Label("Select an asset from the Health section.");
-            _healthDetailLabel.style.paddingTop = 8;
-            _healthDetailLabel.style.paddingBottom = 8;
-            _healthDetailLabel.style.paddingLeft = 8;
-            _healthDetailLabel.style.paddingRight = 8;
-            _healthDetailLabel.style.whiteSpace = WhiteSpace.Normal;
-            _healthDetailLabel.style.color = new Color(0.85f, 0.85f, 0.85f);
-            _healthDetailLabel.style.flexGrow = 1;
-            _healthDetailLabel.style.overflow = Overflow.Hidden;
-            _healthDetailContainer.Add(_healthDetailLabel);
-
-            panel.Add(_healthDetailContainer);
+            panel.Add(_conflictListView);
 
             return panel;
-        }
-
-        private void RefreshRightPanel()
-        {
-            if (_conflictContainer == null || _healthDetailContainer == null) return;
-
-            if (_detailMode == DetailMode.AssetHealth)
-            {
-                SetDisplay(_conflictContainer, false);
-                SetDisplay(_healthDetailContainer, true);
-                RefreshHealthDetail();
-            }
-            else
-            {
-                SetDisplay(_conflictContainer, true);
-                SetDisplay(_healthDetailContainer, false);
-            }
-        }
-
-        private void RefreshHealthDetail()
-        {
-            if (_healthDetailLabel == null || _healthReport == null) return;
-
-            // Rebuild action bar
-            _healthActionBar.Clear();
-
-            if (_selectedHealthIndex < 0
-                || _selectedHealthIndex >= _healthReport.Results.Count)
-            {
-                _healthDetailLabel.text = "Select an asset from the Health section.";
-                SetDisplay(_healthActionBar, false);
-                return;
-            }
-
-            var r = _healthReport.Results[_selectedHealthIndex];
-            SetDisplay(_healthActionBar, true);
-
-            // ── Action buttons ──
-            var pingBtn = new Button(() =>
-            {
-                var obj = AssetDatabase.LoadMainAssetAtPath(r.AssetPath);
-                if (obj != null) { EditorGUIUtility.PingObject(obj); Selection.activeObject = obj; }
-            }) { text = "Ping" };
-            _healthActionBar.Add(pingBtn);
-
-            var openBtn = new Button(() =>
-                AssetDatabase.OpenAsset(AssetDatabase.LoadMainAssetAtPath(r.AssetPath)))
-            { text = "Open Prefab" };
-            _healthActionBar.Add(openBtn);
-
-            var copyBtn = new Button(() =>
-                EditorGUIUtility.systemCopyBuffer = r.AssetPath)
-            { text = "Copy Path" };
-            _healthActionBar.Add(copyBtn);
-
-            // Category-specific fix button
-            switch (r.PrimaryCategory)
-            {
-                case PrefabHealthCategory.MissingScripts:
-                    var rmBtn = new Button(() =>
-                    {
-                        ProjectScanActions.RemoveMissingScripts(r.AssetPath);
-                        Debug.Log($"[Prefab Doctor] Removed missing scripts from {r.DisplayName}");
-                        RunUnifiedAnalysis();
-                    }) { text = "Remove Missing Scripts" };
-                    rmBtn.style.color = new Color(1f, 0.5f, 0f);
-                    _healthActionBar.Add(rmBtn);
-                    break;
-
-                case PrefabHealthCategory.UnusedOverrides:
-                case PrefabHealthCategory.BrokenReferences:
-                    var cleanBtn = new Button(() =>
-                    {
-                        ProjectScanActions.RemoveUnusedOverrides(r.AssetPath);
-                        Debug.Log($"[Prefab Doctor] Cleaned overrides on {r.DisplayName}");
-                        RunUnifiedAnalysis();
-                    }) { text = "Clean Overrides" };
-                    cleanBtn.style.color = new Color(0.5f, 0.8f, 1f);
-                    _healthActionBar.Add(cleanBtn);
-                    break;
-
-                case PrefabHealthCategory.FbxWithoutWrapper:
-                    var wrapBtn = new Button(() =>
-                    {
-                        ProjectScanActions.CreateFbxWrapper(r.BaseFbxPath);
-                        Debug.Log($"[Prefab Doctor] Created wrapper for {r.BaseFbxPath}");
-                        RunUnifiedAnalysis();
-                    }) { text = "Create FBX Wrapper" };
-                    wrapBtn.style.color = new Color(1f, 0.75f, 0f);
-                    _healthActionBar.Add(wrapBtn);
-                    break;
-            }
-
-            // ── Detail text ──
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine(r.DisplayName);
-            sb.AppendLine($"Path: {r.AssetPath}");
-            sb.AppendLine($"Category: {ProjectScanPanel.CategoryLabel(r.PrimaryCategory)}");
-            sb.AppendLine();
-            sb.AppendLine(ProjectScanPanel.BuildDetailsString(r));
-
-            if (r.BadMaterials != null && r.BadMaterials.Count > 0)
-            {
-                sb.AppendLine();
-                sb.AppendLine("Bad materials:");
-                foreach (var mat in r.BadMaterials)
-                    sb.AppendLine($"  {mat.MaterialName} — {mat.ShaderName} ({mat.Reason})");
-            }
-
-            if (r.ImportIssues != null && r.ImportIssues.Count > 0)
-            {
-                sb.AppendLine();
-                sb.AppendLine("FBX import issues:");
-                foreach (var issue in r.ImportIssues)
-                    sb.AppendLine($"  {issue.Setting}: {issue.Reason} → {issue.Suggestion}");
-            }
-
-            _healthDetailLabel.text = sb.ToString();
         }
 
         private Label MakeLabelCell()
@@ -1843,7 +1687,6 @@ namespace SashaRX.PrefabDoctor
             _target = target;
             _subtreeRoot = subtreeRoot;
             _report = null;
-            _healthReport = null;
             _targetField?.SetValueWithoutNotify(_target);
             RunUnifiedAnalysis();
         }
@@ -1853,13 +1696,9 @@ namespace SashaRX.PrefabDoctor
             _target = target;
             _subtreeRoot = null;
             _report = null;
-            _healthReport = null;
             _targetField?.SetValueWithoutNotify(_target);
             // Explicit hierarchy request — bypass auto-detection so we
             // always run the full hierarchy walk, even on prefab roots.
-            StopDependencyScan();
-            _selectedHealthIndex = -1;
-            _detailMode = DetailMode.None;
             RunHierarchyAnalysis();
         }
 
@@ -1871,12 +1710,6 @@ namespace SashaRX.PrefabDoctor
         private void RunUnifiedAnalysis()
         {
             if (_target == null) return;
-
-            // Stop any running dependency scan
-            StopDependencyScan();
-            _healthReport = null;
-            _selectedHealthIndex = -1;
-            _detailMode = DetailMode.None;
 
             // Auto-detect: if target is a single prefab instance root, use
             // instance analysis. Otherwise (scene root, non-prefab parent),
@@ -1890,94 +1723,6 @@ namespace SashaRX.PrefabDoctor
                 RunAnalysis(); // single instance
             else
                 RunHierarchyAnalysis(); // full hierarchy
-        }
-
-        /// <summary>
-        /// Start scanning dependent prefab assets for health issues.
-        /// Called after override analysis completes.
-        /// </summary>
-        private void RunDependencyScan(HashSet<string> assetPaths)
-        {
-            if (assetPaths == null || assetPaths.Count == 0)
-            {
-                RefreshHealthList();
-                return;
-            }
-
-            StopDependencyScan();
-            _pendingDepReport = new ProjectScanReport();
-            _depScanJob = _depScanner.ScanAssetsIncremental(
-                assetPaths, _pendingDepReport, 10);
-            EditorApplication.update += PumpDependencyScanJob;
-        }
-
-        private void StopDependencyScan()
-        {
-            if (_depScanJob != null)
-            {
-                _depScanJob = null;
-                _pendingDepReport = null;
-                EditorApplication.update -= PumpDependencyScanJob;
-            }
-        }
-
-        private void PumpDependencyScanJob()
-        {
-            if (_depScanJob == null)
-            {
-                EditorApplication.update -= PumpDependencyScanJob;
-                return;
-            }
-
-            var sw = Stopwatch.StartNew();
-            try
-            {
-                while (sw.ElapsedMilliseconds < 16)
-                {
-                    if (!_depScanJob.MoveNext())
-                    {
-                        _healthReport = _pendingDepReport;
-                        _depScanJob = null;
-                        _pendingDepReport = null;
-                        EditorApplication.update -= PumpDependencyScanJob;
-
-                        if (_healthReport != null && _healthReport.Results.Count > 0)
-                        {
-                            Debug.Log($"[Prefab Doctor] Dependency scan: "
-                                + $"{_healthReport.Results.Count} issues found "
-                                + $"in {_healthReport.TotalPrefabs} dependent assets "
-                                + $"({_healthReport.ScanTimeMs:F0}ms)");
-                        }
-
-                        RefreshHealthList();
-                        RefreshEmptyState();
-                        return;
-                    }
-                }
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogError($"[Prefab Doctor] Dependency scan failed: {ex.Message}");
-                _depScanJob = null;
-                _pendingDepReport = null;
-                EditorApplication.update -= PumpDependencyScanJob;
-                RefreshEmptyState();
-            }
-        }
-
-        /// <summary>
-        /// Opens the ProjectScanPanel's full-project scan as a separate window.
-        /// The results replace the Asset Health section in the left panel.
-        /// </summary>
-        private void OnScanProjectClicked()
-        {
-            StopDependencyScan();
-            _pendingDepReport = new ProjectScanReport();
-            _depScanner.FolderScope = null;
-            _depScanner.AuditFbxImport = true;
-            _depScanner.CheckMaterials = true;
-            _depScanJob = _depScanner.ScanIncremental(_pendingDepReport, 15);
-            EditorApplication.update += PumpDependencyScanJob;
         }
 
         private void OnFixLodLightmapClicked()
@@ -2070,13 +1815,7 @@ namespace SashaRX.PrefabDoctor
                 _report = _analyzer.Analyze(_target, _subtreeRoot);
                 _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
                 _selectedConflicts.Clear();
-                _detailMode = _selectedGoIndex >= 0
-                    ? DetailMode.OverrideConflicts : DetailMode.None;
                 RefreshAfterReportChange();
-
-                // Phase 2: scan dependent assets
-                if (_report.DependentAssetPaths.Count > 0)
-                    RunDependencyScan(_report.DependentAssetPaths);
             }
 
             Repaint();
@@ -2097,7 +1836,6 @@ namespace SashaRX.PrefabDoctor
             RefreshLeftPanel();
             RebuildConflictList();
             RefreshEmptyState();
-            RefreshRightPanel();
         }
 
         private void RunHierarchyAnalysis()
@@ -2208,9 +1946,6 @@ namespace SashaRX.PrefabDoctor
                     EditorApplication.update -= PumpHierarchyJob;
                     EditorUtility.ClearProgressBar();
 
-                    _detailMode = _selectedGoIndex >= 0
-                        ? DetailMode.OverrideConflicts : DetailMode.None;
-
                     Debug.Log(
                         $"[Prefab Doctor] Hierarchy: {_report.InstancesAnalyzed} instances, "
                         + $"{_report.TotalPingPong} ping-pong, "
@@ -2219,10 +1954,6 @@ namespace SashaRX.PrefabDoctor
                         + $"{_report.AnalysisTimeMs:F0}ms");
 
                     RefreshAfterReportChange();
-
-                    // Phase 2: scan dependent assets
-                    if (_report.DependentAssetPaths.Count > 0)
-                        RunDependencyScan(_report.DependentAssetPaths);
                     return;
                 }
                 _progress = _hierarchyJob.Current;
@@ -2303,16 +2034,10 @@ namespace SashaRX.PrefabDoctor
                         _report = _pendingReport;
                         _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
                         _selectedConflicts.Clear();
-                        _detailMode = _selectedGoIndex >= 0
-                            ? DetailMode.OverrideConflicts : DetailMode.None;
                         _incrementalJob = null;
                         _pendingReport = null;
                         EditorApplication.update -= PumpIncrementalJob;
                         RefreshAfterReportChange();
-
-                        // Phase 2: scan dependent assets
-                        if (_report.DependentAssetPaths.Count > 0)
-                            RunDependencyScan(_report.DependentAssetPaths);
                         return;
                     }
                     _progress = _incrementalJob.Current;
@@ -2336,6 +2061,7 @@ namespace SashaRX.PrefabDoctor
             {
                 _target = PrefabUtility.GetOutermostPrefabInstanceRoot(Selection.activeGameObject);
             }
+            EditorApplication.update += PumpScanJob;
         }
 
         private void OnDisable()
