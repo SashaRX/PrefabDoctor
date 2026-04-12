@@ -65,6 +65,15 @@ namespace SashaRX.PrefabDoctor
         private readonly Dictionary<int, List<(PropertyKey key, OverrideEntry entry)>>
             _processedModsCache = new();
 
+        // Key base cache: MakeKey does GetType().Name (reflection) and
+        // GetRelativePath (walks the whole transform parent chain + string
+        // concat) per mod. All mods targeting the same component share
+        // the same (ComponentType, GameObjectPath, TargetInstanceId) — only
+        // PropertyPath differs. Caching the base by target InstanceID turns
+        // 22M reflection+walk calls into ~5000 on the user's scene.
+        private readonly Dictionary<int, (string componentType, string goPath, int targetId)>
+            _keyBaseCache = new();
+
         private void BeginRun()
         {
             var settings = PrefabDoctorSettings.GetOrCreateDefault();
@@ -105,6 +114,7 @@ namespace SashaRX.PrefabDoctor
             _goPathCache.Clear();
             _componentCache.Clear();
             _processedModsCache.Clear();
+            _keyBaseCache.Clear();
         }
 
         // ── Chain Building ─────────────────────────────────────────
@@ -280,11 +290,19 @@ namespace SashaRX.PrefabDoctor
 
         /// <summary>
         /// Stripped-down ProcessMod for hierarchy mode's fast path.
-        /// Skips <c>PrefabUtility.IsDefaultOverride</c> which is the
-        /// single most expensive per-mod call (~5μs × 22M mods = ~110s).
-        /// Default overrides that slip through are harmless — they get
-        /// classified as Insignificant (value matches source) and do not
-        /// affect actionable counts (PP / Multi / Orphan).
+        /// Two key differences from the regular <see cref="ProcessMod"/>:
+        /// <list type="number">
+        ///   <item>Skips <c>PrefabUtility.IsDefaultOverride</c> (~2-5μs
+        ///   per call × 22M mods = ~50-110s saved). Default overrides
+        ///   that slip through are classified as Insignificant and don't
+        ///   affect actionable counts.</item>
+        ///   <item>Uses <see cref="_keyBaseCache"/> to avoid
+        ///   <c>GetType().Name</c> (reflection) and
+        ///   <c>GetRelativePath</c> (transform parent walk + string
+        ///   concat) for every mod. All mods targeting the same component
+        ///   share the same key base — only <c>PropertyPath</c> differs.
+        ///   22M lookups → ~5000 computes.</item>
+        /// </list>
         /// </summary>
         private void ProcessModFast(PropertyModification mod, NestingLevel level,
             Dictionary<PropertyKey, List<OverrideEntry>> map)
@@ -305,10 +323,25 @@ namespace SashaRX.PrefabDoctor
             if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
                 return;
 
-            if (IsIgnoredComponentType(mod.target.GetType().Name))
+            // Cached key base: GetType().Name + GetRelativePath + GetInstanceID
+            int targetId = mod.target.GetInstanceID();
+            if (!_keyBaseCache.TryGetValue(targetId, out var keyBase))
+            {
+                string typeName = mod.target.GetType().Name;
+                keyBase = (typeName, GetRelativePath(mod.target), targetId);
+                _keyBaseCache[targetId] = keyBase;
+            }
+
+            if (IsIgnoredComponentType(keyBase.componentType))
                 return;
 
-            var key = MakeKey(mod);
+            var key = new PropertyKey
+            {
+                ComponentType = keyBase.componentType,
+                GameObjectPath = keyBase.goPath,
+                PropertyPath = mod.propertyPath,
+                TargetInstanceId = keyBase.targetId
+            };
             AddToMap(map, key, level, mod);
         }
 
