@@ -359,8 +359,7 @@ namespace SashaRX.PrefabDoctor
             }
             else if (_hierarchyJob != null)
             {
-                // Show inline progress alongside the modal DisplayCancelableProgressBar
-                // so the user always sees feedback even if the modal flickers.
+                // Inline progress bar for hierarchy analysis (no modal dialog).
                 _emptyStateLabel.text = $"Analyzing hierarchy… {_progress:P0}";
                 SetDisplay(_emptyStateProgress, true);
                 _emptyStateProgress.value = _progress * 100f;
@@ -2049,7 +2048,6 @@ namespace SashaRX.PrefabDoctor
                 _hierarchyJob = null;
                 _pendingHierarchyReport = null;
                 EditorApplication.update -= PumpHierarchyJob;
-                EditorUtility.ClearProgressBar();
             }
 
             _analyzer.IncludeDefaultOverrides = _showDefaults;
@@ -2066,12 +2064,8 @@ namespace SashaRX.PrefabDoctor
                 _target, _pendingHierarchyReport);
             _progress = 0f;
 
-            EditorUtility.DisplayProgressBar(
-                "Prefab Doctor",
-                $"Analyzing hierarchy ({_hierarchyInstancesTotal} instances)...",
-                0f);
-
             EditorApplication.update += PumpHierarchyJob;
+            RefreshEmptyState();
             Repaint();
         }
 
@@ -2080,39 +2074,13 @@ namespace SashaRX.PrefabDoctor
             if (_hierarchyJob == null)
             {
                 EditorApplication.update -= PumpHierarchyJob;
-                EditorUtility.ClearProgressBar();
                 return;
             }
 
-            // DisplayCancelableProgressBar is cheap enough to call every
-            // pump tick and is the only way to surface the Cancel button.
-            if (EditorUtility.DisplayCancelableProgressBar(
-                    "Prefab Doctor",
-                    $"Analyzing hierarchy {_progress:P0} ({_hierarchyInstancesTotal} instances)",
-                    _progress))
-            {
-                try { _analyzer.AbortRun(); }
-                finally
-                {
-                    _hierarchyJob = null;
-                    _pendingHierarchyReport = null;
-                    EditorApplication.update -= PumpHierarchyJob;
-                    EditorUtility.ClearProgressBar();
-                }
-                Debug.Log("[Prefab Doctor] Hierarchy analysis cancelled by user");
-                Repaint();
-                return;
-            }
-
-            // Advance the enumerator for up to 200ms per pump tick.
-            // The hierarchy scan runs behind a modal DisplayCancelable-
-            // ProgressBar, so 60fps responsiveness is not needed — the
-            // only UI the user interacts with is the Cancel button,
-            // which we check at the top of every tick. 200ms gives
-            // ~12x throughput vs the old 16ms budget while still keeping
-            // Cancel latency under a quarter second.
+            // Advance the enumerator for up to 16ms per pump tick
+            // (inline progress bar, no modal dialog).
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 200)
+            while (sw.ElapsedMilliseconds < 16)
             {
                 if (!_hierarchyJob.MoveNext())
                 {
@@ -2144,7 +2112,6 @@ namespace SashaRX.PrefabDoctor
                     _hierarchyJob = null;
                     _pendingHierarchyReport = null;
                     EditorApplication.update -= PumpHierarchyJob;
-                    EditorUtility.ClearProgressBar();
 
                     Debug.Log(
                         $"[Prefab Doctor] Hierarchy: {_report.InstancesAnalyzed} instances, "
