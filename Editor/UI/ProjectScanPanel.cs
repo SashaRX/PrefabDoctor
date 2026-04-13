@@ -156,6 +156,7 @@ namespace SashaRX.PrefabDoctor
             var tb = new Toolbar();
 
             _scopeMenu = new ToolbarMenu { text = _folderScope ?? "Entire Project" };
+            _scopeMenu.tooltip = "Folder to scan \u2014 pick a subfolder to narrow scope";
             _scopeMenu.style.minWidth = 160;
             _scopeMenu.menu.AppendAction("Entire Project", _ => { _folderScope = null; _scopeMenu.text = "Entire Project"; });
             _scopeMenu.menu.AppendSeparator();
@@ -173,12 +174,14 @@ namespace SashaRX.PrefabDoctor
             tb.Add(_scopeMenu);
 
             var scanBtn = new ToolbarButton(() => { RunScan(); RefreshVisibility(); }) { text = "Scan Project" };
+            scanBtn.tooltip = "Scan all prefab assets in the selected scope for health issues";
             scanBtn.style.color = new Color(0.4f, 0.75f, 1f);
             tb.Add(scanBtn);
 
             tb.Add(new ToolbarSpacer());
 
             _filterMenu = new ToolbarMenu { text = "All Issues" };
+            _filterMenu.tooltip = "Filter results by issue category";
             _filterMenu.style.minWidth = 120;
             foreach (ScanFilterMode fm in System.Enum.GetValues(typeof(ScanFilterMode)))
             {
@@ -195,14 +198,17 @@ namespace SashaRX.PrefabDoctor
             tb.Add(new ToolbarSpacer { style = { flexGrow = 1 } });
 
             _fbxToggle = new ToolbarToggle { text = "FBX Audit", value = _auditFbx };
+            _fbxToggle.tooltip = "Check for FBX models used directly without a Prefab Variant wrapper";
             _fbxToggle.RegisterValueChangedCallback(e => _auditFbx = e.newValue);
             tb.Add(_fbxToggle);
 
             _matToggle = new ToolbarToggle { text = "Materials", value = _checkMaterials };
+            _matToggle.tooltip = "Check for missing or placeholder materials on prefab renderers";
             _matToggle.RegisterValueChangedCallback(e => _checkMaterials = e.newValue);
             tb.Add(_matToggle);
 
             var cleanBtn = new ToolbarButton(DoCleanAllUnused) { text = "Clean All Unused" };
+            cleanBtn.tooltip = "Remove all unused PropertyModification overrides from scanned prefabs";
             cleanBtn.style.color = new Color(1f, 0.75f, 0.3f);
             tb.Add(cleanBtn);
 

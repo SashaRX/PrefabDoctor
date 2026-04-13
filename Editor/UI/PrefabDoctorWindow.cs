@@ -2126,11 +2126,14 @@ namespace SashaRX.PrefabDoctor
                     $"Analyzing hierarchy {_progress:P0} ({_hierarchyInstancesTotal} instances)",
                     _progress))
             {
-                _analyzer.AbortRun();
-                _hierarchyJob = null;
-                _pendingHierarchyReport = null;
-                EditorApplication.update -= PumpHierarchyJob;
-                EditorUtility.ClearProgressBar();
+                try { _analyzer.AbortRun(); }
+                finally
+                {
+                    _hierarchyJob = null;
+                    _pendingHierarchyReport = null;
+                    EditorApplication.update -= PumpHierarchyJob;
+                    EditorUtility.ClearProgressBar();
+                }
                 Debug.Log("[Prefab Doctor] Hierarchy analysis cancelled by user");
                 Repaint();
                 return;
@@ -2277,11 +2280,13 @@ namespace SashaRX.PrefabDoctor
             }
             catch (System.Exception ex)
             {
-                Debug.LogError($"[Prefab Doctor] Incremental analysis failed: {ex.Message}");
+                Debug.LogError($"[Prefab Doctor] Incremental analysis failed: {ex}");
                 _incrementalJob = null;
                 _pendingReport = null;
                 EditorApplication.update -= PumpIncrementalJob;
-                _analyzer?.ClearSerializedObjectCache();
+                EditorUtility.ClearProgressBar();
+                _analyzer?.AbortRun();
+                Repaint();
             }
             RefreshEmptyState();
         }

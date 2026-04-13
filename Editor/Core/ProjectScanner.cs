@@ -98,13 +98,19 @@ namespace SashaRX.PrefabDoctor
             string[] guids = AssetDatabase.FindAssets("t:Prefab", searchFolders);
             report.TotalPrefabs = guids.Length;
 
-            // Build index (fast — no asset loading)
-            var fbxIndex = BuildFbxWrapperIndex(guids);
+            // Build FBX wrapper index with progress feedback (0 → 0.1)
+            var fbxIndex = new Dictionary<string, List<string>>();
+            for (int fi = 0; fi < guids.Length; fi++)
+            {
+                BuildFbxWrapperEntry(guids[fi], fbxIndex);
+                if (fi % batchSize == 0)
+                    yield return 0.1f * ((float)fi / guids.Length);
+            }
             report.FbxToWrappersIndex = fbxIndex;
 
             yield return 0.1f; // index built
 
-            // Analyze each prefab
+            // Analyze each prefab (0.1 → 1.0)
             for (int i = 0; i < guids.Length; i++)
             {
                 string path = AssetDatabase.GUIDToAssetPath(guids[i]);
@@ -156,7 +162,14 @@ namespace SashaRX.PrefabDoctor
                     guids.Add(guid);
             }
 
-            var fbxIndex = BuildFbxWrapperIndex(guids.ToArray());
+            // Build FBX wrapper index with progress feedback (0 → 0.1)
+            var fbxIndex = new Dictionary<string, List<string>>();
+            for (int fi = 0; fi < guids.Count; fi++)
+            {
+                BuildFbxWrapperEntry(guids[fi], fbxIndex);
+                if (fi % batchSize == 0)
+                    yield return 0.1f * ((float)fi / guids.Count);
+            }
             report.FbxToWrappersIndex = fbxIndex;
 
             yield return 0.1f;
@@ -194,45 +207,45 @@ namespace SashaRX.PrefabDoctor
         /// <summary>
         /// Build index: for each FBX/model asset, which prefab assets are
         /// Prefab Variants based on it (i.e. "wrappers").
+        /// Used by the non-incremental <see cref="Scan"/> path.
         /// </summary>
         private Dictionary<string, List<string>> BuildFbxWrapperIndex(string[] prefabGuids)
         {
             var index = new Dictionary<string, List<string>>();
-
             foreach (var guid in prefabGuids)
+                BuildFbxWrapperEntry(guid, index);
+            return index;
+        }
+
+        /// <summary>
+        /// Process a single prefab GUID and add any FBX wrapper entries to the index.
+        /// </summary>
+        private void BuildFbxWrapperEntry(string guid, Dictionary<string, List<string>> index)
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+
+            string[] deps = AssetDatabase.GetDependencies(path, false);
+            foreach (var dep in deps)
             {
-                string path = AssetDatabase.GUIDToAssetPath(guid);
+                if (!IsModelAsset(dep)) continue;
 
-                // Check what this prefab's base is
-                // Use dependencies: if prefab depends on a .fbx, it might be a wrapper
-                string[] deps = AssetDatabase.GetDependencies(path, false);
-                foreach (var dep in deps)
+                var prefab = AssetDatabase.LoadMainAssetAtPath(path) as GameObject;
+                if (prefab == null) continue;
+
+                var source = PrefabUtility.GetCorrespondingObjectFromSource(prefab);
+                if (source == null) continue;
+
+                string sourcePath = AssetDatabase.GetAssetPath(source);
+                if (sourcePath == dep)
                 {
-                    if (!IsModelAsset(dep)) continue;
-
-                    // This prefab depends on a model file — could be a wrapper
-                    // Verify: load and check if it's a direct Prefab Variant of the model
-                    var prefab = AssetDatabase.LoadMainAssetAtPath(path) as GameObject;
-                    if (prefab == null) continue;
-
-                    var source = PrefabUtility.GetCorrespondingObjectFromSource(prefab);
-                    if (source == null) continue;
-
-                    string sourcePath = AssetDatabase.GetAssetPath(source);
-                    if (sourcePath == dep)
+                    if (!index.TryGetValue(dep, out var list))
                     {
-                        // This is a direct wrapper/variant of the model
-                        if (!index.TryGetValue(dep, out var list))
-                        {
-                            list = new List<string>();
-                            index[dep] = list;
-                        }
-                        list.Add(path);
+                        list = new List<string>();
+                        index[dep] = list;
                     }
+                    list.Add(path);
                 }
             }
-
-            return index;
         }
 
         // ── Per-Prefab Analysis ────────────────────────────────────

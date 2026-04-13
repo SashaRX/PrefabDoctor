@@ -865,7 +865,7 @@ namespace SashaRX.PrefabDoctor
             for (int i = 0; i < results.Length; i++)
             {
                 var (conflicts, instanceRoot) = results[i];
-                if (conflicts == null) continue;
+                if (conflicts.Count == 0) continue;
 
                 foreach (var conflict in conflicts)
                 {
