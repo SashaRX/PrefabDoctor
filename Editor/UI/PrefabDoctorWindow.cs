@@ -1443,9 +1443,11 @@ namespace SashaRX.PrefabDoctor
                 && _selectedGoIndex < _prefabGroups.Count)
             {
                 var group = _prefabGroups[_selectedGoIndex];
+                int totalOvr = 0;
+                foreach (var (_, cnt) in _instanceRows) totalOvr += cnt;
                 _conflictHeaderLabel.text =
                     $"{group.DisplayName} — {group.Instances.Count} instances · "
-                    + $"{_conflictRows.Count} overrides";
+                    + $"{totalOvr} overrides";
                 _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
                 _conflictHeaderLabel.style.color = new Color(0.9f, 0.9f, 0.9f);
                 _conflictHeaderPingButton.style.display = DisplayStyle.Flex;
