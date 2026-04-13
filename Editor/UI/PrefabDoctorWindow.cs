@@ -896,9 +896,11 @@ namespace SashaRX.PrefabDoctor
                 groupMap[kvp.Key] = group;
             }
 
-            // Step 2: single pass over all GameObjectReports — O(M)
-            // Each GO resolves to an instance root → asset path → group.
-            foreach (var goReport in _report.GameObjects)
+            // Step 2: iterate FILTERED GameObjects only (already cached) — O(F)
+            // where F << M for most filters. Avoids re-running PassesFilter
+            // on all 22M conflicts.
+            var filteredGOs = GetFilteredGameObjects();
+            foreach (var goReport in filteredGOs)
             {
                 if (!_report.GoPathToInstanceRoot.TryGetValue(
                         goReport.RelativePath, out var instRoot)
@@ -909,14 +911,6 @@ namespace SashaRX.PrefabDoctor
 
                 if (!groupMap.TryGetValue(assetPath, out var group))
                     continue;
-
-                // Quick filter check — does this GO have any matching conflicts?
-                bool hasMatch = false;
-                foreach (var c in goReport.Conflicts)
-                {
-                    if (PassesFilter(c)) { hasMatch = true; break; }
-                }
-                if (!hasMatch) continue;
 
                 group.ChildReports.Add(goReport);
                 group.TotalConflicts += goReport.Conflicts.Count;

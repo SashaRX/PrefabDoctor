@@ -611,7 +611,8 @@ namespace SashaRX.PrefabDoctor
 
             // Find all PrefabInstance roots recursively.
             var instanceRoots = new List<(GameObject go, string hierarchyPath)>();
-            CollectPrefabInstanceRoots(root.transform, "", instanceRoots);
+            var pathBuilder = new System.Text.StringBuilder(256);
+            CollectPrefabInstanceRoots(root.transform, pathBuilder, instanceRoots);
 
             // Also include the root itself if it's the outermost prefab
             // instance — otherwise overrides living directly on Level (scene
@@ -784,23 +785,24 @@ namespace SashaRX.PrefabDoctor
         /// <summary>
         /// Recursively find all GameObjects that are PrefabInstance roots.
         /// </summary>
-        private void CollectPrefabInstanceRoots(Transform parent, string parentPath,
+        private void CollectPrefabInstanceRoots(Transform parent,
+            System.Text.StringBuilder pathBuilder,
             List<(GameObject go, string hierarchyPath)> results)
         {
             for (int i = 0; i < parent.childCount; i++)
             {
                 var child = parent.GetChild(i);
-                string childPath = parentPath.Length > 0
-                    ? $"{parentPath}/{child.name}"
-                    : child.name;
+                int prevLen = pathBuilder.Length;
+                if (prevLen > 0) pathBuilder.Append('/');
+                pathBuilder.Append(child.name);
 
                 if (PrefabUtility.IsAnyPrefabInstanceRoot(child.gameObject))
                 {
-                    results.Add((child.gameObject, childPath));
+                    results.Add((child.gameObject, pathBuilder.ToString()));
                 }
 
-                // Continue recursing into children — nested instances inside nested instances
-                CollectPrefabInstanceRoots(child, childPath, results);
+                CollectPrefabInstanceRoots(child, pathBuilder, results);
+                pathBuilder.Length = prevLen; // restore
             }
         }
 
@@ -966,8 +968,11 @@ namespace SashaRX.PrefabDoctor
         {
             const float dotThreshold = 0.99999f; // ~0.01°
 
-            var depths = qg.ValuesByDepth.Keys.OrderBy(d => d).ToList();
-            if (depths.Count < 2) return null;
+            if (qg.ValuesByDepth.Count < 2) return null;
+
+            // Sort depths without LINQ — typically 2-5 items.
+            var depths = new List<int>(qg.ValuesByDepth.Keys);
+            depths.Sort();
 
             // All same rotation?
             bool allSame = true;
@@ -978,12 +983,17 @@ namespace SashaRX.PrefabDoctor
                 { allSame = false; break; }
             }
 
-            var entries = depths.Select(d => new OverrideEntry
+            var entries = new List<OverrideEntry>(depths.Count);
+            for (int i = 0; i < depths.Count; i++)
             {
-                Depth = d,
-                Value = FmtQ(qg.ValuesByDepth[d]),
-                AssetPath = qg.AssetPathsByDepth.GetValueOrDefault(d, "")
-            }).ToList();
+                int d = depths[i];
+                entries.Add(new OverrideEntry
+                {
+                    Depth = d,
+                    Value = FmtQ(qg.ValuesByDepth[d]),
+                    AssetPath = qg.AssetPathsByDepth.GetValueOrDefault(d, "")
+                });
+            }
 
             if (allSame)
                 return new PropertyConflict
