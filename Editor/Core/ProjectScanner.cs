@@ -368,6 +368,9 @@ namespace SashaRX.PrefabDoctor
 
         private void CheckBrokenReferences(GameObject prefab, PrefabScanResult result)
         {
+            if (!PrefabUtility.HasPrefabInstanceAnyOverrides(prefab, false))
+                return;
+
             var mods = PrefabUtility.GetPropertyModifications(prefab);
             if (mods == null) return;
 
@@ -389,18 +392,20 @@ namespace SashaRX.PrefabDoctor
 
         private void CheckUnusedOverrides(GameObject prefab, PrefabScanResult result)
         {
+            // Gate: skip the expensive override check if no non-default overrides exist.
+            if (!PrefabUtility.HasPrefabInstanceAnyOverrides(prefab, false))
+                return;
+
             var mods = PrefabUtility.GetPropertyModifications(prefab);
             if (mods == null) return;
 
             int unused = 0;
-            // Cache SerializedObjects by target to avoid repeated creation and
-            // ensure proper disposal — each SO holds a native handle.
             var soCache = new Dictionary<UnityEngine.Object, SerializedObject>();
             try
             {
                 foreach (var mod in mods)
                 {
-                    if (mod.target == null) continue; // already counted as broken ref
+                    if (mod.target == null) continue;
                     if (PrefabUtility.IsDefaultOverride(mod)) continue;
 
                     try

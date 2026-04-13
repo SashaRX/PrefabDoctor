@@ -88,20 +88,27 @@ namespace SashaRX.PrefabDoctor
         {
             EditorApplication.projectChanged -= OnProjectChanged;
             EditorApplication.projectChanged += OnProjectChanged;
+            Undo.undoRedoPerformed -= OnUndoRedo;
+            Undo.undoRedoPerformed += OnUndoRedo;
         }
 
-        /// <summary>
-        /// Unregister cache invalidation events.
-        /// Called from the window's OnDisable.
-        /// </summary>
         public void UnregisterCacheInvalidation()
         {
             EditorApplication.projectChanged -= OnProjectChanged;
+            Undo.undoRedoPerformed -= OnUndoRedo;
         }
 
         private void OnProjectChanged()
         {
+            // Prefab assets may have changed — invalidate depth 1+ cache.
             _processedModsCacheDirty = true;
+        }
+
+        private void OnUndoRedo()
+        {
+            // Scene overrides may have changed — depth 0 is always re-fetched
+            // per run, but the _keyBaseCache might reference destroyed objects.
+            _keyBaseCache.Clear();
         }
 
         // Key base cache: MakeKey does GetType().Name (reflection) and
