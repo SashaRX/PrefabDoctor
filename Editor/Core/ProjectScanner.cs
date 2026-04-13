@@ -368,9 +368,8 @@ namespace SashaRX.PrefabDoctor
 
         private void CheckBrokenReferences(GameObject prefab, PrefabScanResult result)
         {
-            if (!PrefabUtility.HasPrefabInstanceAnyOverrides(prefab, false))
-                return;
-
+            // No HasPrefabInstanceAnyOverrides gate here — this method runs
+            // on prefab ASSETS (not scene instances), where that API doesn't apply.
             var mods = PrefabUtility.GetPropertyModifications(prefab);
             if (mods == null) return;
 
@@ -392,10 +391,8 @@ namespace SashaRX.PrefabDoctor
 
         private void CheckUnusedOverrides(GameObject prefab, PrefabScanResult result)
         {
-            // Gate: skip the expensive override check if no non-default overrides exist.
-            if (!PrefabUtility.HasPrefabInstanceAnyOverrides(prefab, false))
-                return;
-
+            // No HasPrefabInstanceAnyOverrides gate here — this method runs
+            // on prefab ASSETS (not scene instances), where that API doesn't apply.
             var mods = PrefabUtility.GetPropertyModifications(prefab);
             if (mods == null) return;
 

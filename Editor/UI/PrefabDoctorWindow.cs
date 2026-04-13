@@ -1174,6 +1174,11 @@ namespace SashaRX.PrefabDoctor
             if (_report == null || _prefabGroups == null
                 || _selectedGoIndex < 0 || _selectedGoIndex >= _prefabGroups.Count) return;
 
+            // Clear all selections — drill-down mixes rows from multiple
+            // GoReportIndexes, so the single-index selection sync doesn't
+            // apply. Start fresh to avoid stale hidden handles.
+            _selectedConflicts.Clear();
+
             var group = _prefabGroups[_selectedGoIndex];
             _conflictRows.Clear();
 

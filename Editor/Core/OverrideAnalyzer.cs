@@ -749,6 +749,11 @@ namespace SashaRX.PrefabDoctor
                 yield return total > 0 ? (float)(idx + 1) / total : 1f;
             }
 
+            // Flush any remaining batch that wasn't processed inside the loop
+            // (can happen when last iterations hit `continue` before the flush site).
+            if (batch.Count > 0)
+                ProcessBatchParallel(batch, goReports, goPathToRoot, report);
+
             var goList = new List<GameObjectReport>(goReports.Values);
             goList.Sort(static (a, b) =>
             {
