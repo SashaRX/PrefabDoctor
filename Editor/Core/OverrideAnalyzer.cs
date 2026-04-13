@@ -298,6 +298,13 @@ namespace SashaRX.PrefabDoctor
                 else
                 {
                     // Depth 0 (scene instance): always unique per instance.
+                    // Gate: skip the expensive GetPropertyModifications if
+                    // no non-default overrides exist on this instance.
+                    if (!IncludeDefaultOverrides
+                        && level.Root != null
+                        && !PrefabUtility.HasPrefabInstanceAnyOverrides(level.Root, false))
+                        continue;
+
                     var mods = PrefabUtility.GetPropertyModifications(level.Root);
                     if (mods == null) continue;
 
@@ -326,6 +333,11 @@ namespace SashaRX.PrefabDoctor
         private void ProcessModFast(PropertyModification mod, NestingLevel level,
             Dictionary<PropertyKey, List<OverrideEntry>> map)
         {
+            // Skip default overrides early — avoids processing m_Name,
+            // m_IsActive, m_Father etc. that Unity always emits.
+            if (!IncludeDefaultOverrides && PrefabUtility.IsDefaultOverride(mod))
+                return;
+
             if (mod.target == null)
             {
                 var orphanKey = new PropertyKey
@@ -673,6 +685,13 @@ namespace SashaRX.PrefabDoctor
                         report.DependentAssetPaths.Add(level.AssetPath);
 
                 if (chain.Count < 2) continue;
+
+                // Gate: skip instances with no non-default overrides.
+                // HasPrefabInstanceAnyOverrides is documented as the fastest
+                // way to check — avoids the expensive GetPropertyModifications.
+                if (!IncludeDefaultOverrides
+                    && !PrefabUtility.HasPrefabInstanceAnyOverrides(instanceRoot, false))
+                    continue;
 
                 batch.Add((instanceRoot, hierPath, chain));
 
