@@ -704,14 +704,14 @@ namespace SashaRX.PrefabDoctor
 
                 var chain = BuildChainCached(instanceRoot, chainTemplateCache);
 
-                // Map instance → its IMMEDIATE prefab source (chain[1])
-                // for UI grouping by prefab type. Using chain[1] instead of
-                // chain[last] avoids lumping all nested variants under a
-                // single shared base asset (e.g. one FBX at the bottom).
-                // chain[0] = scene instance, chain[1] = direct source prefab.
-                if (chain.Count >= 2 && !chain[1].IsSceneInstance)
+                // Map instance → the prefab asset it IS (not where it lives).
+                // GetCorrespondingObjectFromSource gives the immediate prefab
+                // this instance was created from (e.g. AirCon_01.prefab), while
+                // chain[1] gives the parent prefab that CONTAINS it (Level.prefab).
+                var source = PrefabUtility.GetCorrespondingObjectFromSource(instanceRoot);
+                if (source != null)
                 {
-                    string srcPath = chain[1].AssetPath;
+                    string srcPath = AssetDatabase.GetAssetPath(source);
                     if (!string.IsNullOrEmpty(srcPath))
                     {
                         report.InstanceToAsset[instanceRoot] = srcPath;
