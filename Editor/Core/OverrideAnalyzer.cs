@@ -637,8 +637,7 @@ namespace SashaRX.PrefabDoctor
             var batch = new List<(
                 GameObject instanceRoot,
                 string hierPath,
-                List<NestingLevel> chain,
-                PropertyModification[] depth0Mods)>(batchSize);
+                List<NestingLevel> chain)>(batchSize);
 
             for (int idx = 0; idx < total; idx++)
             {
@@ -673,37 +672,7 @@ namespace SashaRX.PrefabDoctor
 
                 if (chain.Count < 2) continue;
 
-                // Pre-fetch depth-0 mods (Unity API, main thread only).
-                PropertyModification[] depth0Mods = null;
-                if (chain.Count > 0)
-                {
-                    var d0 = chain[0];
-                    if (!d0.IsSceneInstance || IncludeSceneOverrides)
-                        depth0Mods = PrefabUtility.GetPropertyModifications(d0.Root);
-                }
-
-                // Pre-populate _processedModsCache for depth 1+ (Unity API).
-                for (int ci = 1; ci < chain.Count; ci++)
-                {
-                    var level = chain[ci];
-                    if (level.IsSceneInstance) continue;
-                    int rootId = level.Root.GetInstanceID();
-                    if (_processedModsCache.ContainsKey(rootId)) continue;
-
-                    var tempMap = new Dictionary<PropertyKey, List<OverrideEntry>>();
-                    var mods = PrefabUtility.GetPropertyModifications(level.Root);
-                    if (mods != null)
-                        for (int m = 0; m < mods.Length; m++)
-                            ProcessModFast(mods[m], level, tempMap);
-
-                    var cached = new List<(PropertyKey, OverrideEntry)>();
-                    foreach (var kvp in tempMap)
-                        foreach (var entry in kvp.Value)
-                            cached.Add((kvp.Key, entry));
-                    _processedModsCache[rootId] = cached;
-                }
-
-                batch.Add((instanceRoot, hierPath, chain, depth0Mods));
+                batch.Add((instanceRoot, hierPath, chain));
 
                 // ── Phase 2: Process batch in parallel ──
                 if (batch.Count >= batchSize || idx == total - 1)
@@ -735,101 +704,45 @@ namespace SashaRX.PrefabDoctor
         }
 
         /// <summary>
-        /// Process a batch of instances in parallel. Each instance's
-        /// overrides are collected and classified on a worker thread,
-        /// then results are merged on the calling thread.
+        /// Process a batch of instances: collect overrides on main thread
+        /// (Unity API), then classify conflicts in parallel (pure computation),
+        /// then merge results on main thread.
         /// </summary>
         private void ProcessBatchParallel(
             List<(GameObject instanceRoot, string hierPath,
-                List<NestingLevel> chain, PropertyModification[] depth0Mods)> batch,
+                List<NestingLevel> chain)> batch,
             Dictionary<string, GameObjectReport> goReports,
             Dictionary<string, GameObject> goPathToRoot,
             AnalysisReport report)
         {
-            // Per-instance results collected in parallel.
-            var results = new (
-                List<PropertyConflict> conflicts,
+            // ── Main thread: build overrideMaps (Unity API calls) ──
+            var prepared = new (
+                Dictionary<PropertyKey, List<OverrideEntry>> overrideMap,
                 string hierPath,
+                List<NestingLevel> chain,
                 GameObject instanceRoot
             )[batch.Count];
 
-            // Process each instance independently on worker threads.
-            System.Threading.Tasks.Parallel.For(0, batch.Count, i =>
+            for (int i = 0; i < batch.Count; i++)
             {
-                var (instanceRoot, hierPath, chain, depth0Mods) = batch[i];
-
-                // Build override map: merge cached depth 1+ entries + process depth 0 mods.
+                var (instanceRoot, hierPath, chain) = batch[i];
                 var overrideMap = new Dictionary<PropertyKey, List<OverrideEntry>>();
+                CollectOverridesFast(chain, overrideMap);
+                prepared[i] = (overrideMap, hierPath, chain, instanceRoot);
+            }
 
-                // Depth 1+: merge from pre-populated cache (read-only, thread-safe).
-                for (int ci = 1; ci < chain.Count; ci++)
-                {
-                    var level = chain[ci];
-                    if (level.IsSceneInstance) continue;
-                    int rootId = level.Root.GetInstanceID();
-                    if (!_processedModsCache.TryGetValue(rootId, out var cached)) continue;
+            // ── Parallel: classify conflicts (no Unity API) ──
+            var results = new (
+                List<PropertyConflict> conflicts,
+                GameObject instanceRoot
+            )[batch.Count];
 
-                    for (int c = 0; c < cached.Count; c++)
-                    {
-                        var (key, entry) = cached[c];
-                        if (!overrideMap.TryGetValue(key, out var list))
-                        {
-                            list = new List<OverrideEntry>(4);
-                            overrideMap[key] = list;
-                        }
-                        list.Add(entry);
-                    }
-                }
-
-                // Depth 0: process mods with thread-local key cache.
-                if (depth0Mods != null)
-                {
-                    var d0Level = chain[0];
-                    var localKeyCache = new Dictionary<int, (string componentType, string goPath, int targetId)>();
-                    for (int m = 0; m < depth0Mods.Length; m++)
-                    {
-                        var mod = depth0Mods[m];
-                        if (mod.target == null)
-                        {
-                            var orphanKey = new PropertyKey
-                            {
-                                ComponentType = "MISSING",
-                                GameObjectPath = "(orphaned)",
-                                PropertyPath = mod.propertyPath,
-                                TargetInstanceId = 0
-                            };
-                            AddToMap(overrideMap, orphanKey, d0Level, mod);
-                            continue;
-                        }
-
-                        if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
-                            continue;
-
-                        int targetId = mod.target.GetInstanceID();
-                        if (!localKeyCache.TryGetValue(targetId, out var keyBase))
-                        {
-                            string typeName = mod.target.GetType().Name;
-                            keyBase = (typeName, GetRelativePath(mod.target), targetId);
-                            localKeyCache[targetId] = keyBase;
-                        }
-
-                        if (IsIgnoredComponentType(keyBase.componentType))
-                            continue;
-
-                        var key = new PropertyKey
-                        {
-                            ComponentType = keyBase.componentType,
-                            GameObjectPath = keyBase.goPath,
-                            PropertyPath = mod.propertyPath,
-                            TargetInstanceId = keyBase.targetId
-                        };
-                        AddToMap(overrideMap, key, d0Level, mod);
-                    }
-                }
-
-                // Classify conflicts (pure computation).
+            Parallel.For(0, batch.Count, i =>
+            {
+                var (overrideMap, hierPath, chain, instanceRoot) = prepared[i];
                 var instanceConflicts = new List<PropertyConflict>();
 
+                // Scalar properties.
                 foreach (var kvp in overrideMap)
                 {
                     if (ComparerRouter.IsQuaternionComponent(kvp.Key.PropertyPath))
@@ -876,13 +789,13 @@ namespace SashaRX.PrefabDoctor
                         instanceConflicts.Add(conflict);
                 }
 
-                results[i] = (instanceConflicts, hierPath, instanceRoot);
+                results[i] = (instanceConflicts, instanceRoot);
             });
 
-            // ── Phase 3: Merge results on main thread ──
+            // ── Main thread: merge results into report ──
             for (int i = 0; i < results.Length; i++)
             {
-                var (conflicts, hierPath, instanceRoot) = results[i];
+                var (conflicts, instanceRoot) = results[i];
                 if (conflicts == null) continue;
 
                 foreach (var conflict in conflicts)
