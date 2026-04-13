@@ -361,10 +361,12 @@ namespace SashaRX.PrefabDoctor
             }
             else if (_hierarchyJob != null)
             {
-                // Hierarchy scan uses modal DisplayCancelableProgressBar,
-                // so just show a short label — no inline progress bar needed.
-                _emptyStateLabel.text = "Analyzing…";
-                SetDisplay(_emptyStateProgress, false);
+                // Show inline progress alongside the modal DisplayCancelableProgressBar
+                // so the user always sees feedback even if the modal flickers.
+                _emptyStateLabel.text = $"Analyzing hierarchy… {_progress:P0}";
+                SetDisplay(_emptyStateProgress, true);
+                _emptyStateProgress.value = _progress * 100f;
+                _emptyStateProgress.title = $"{_progress * 100f:F0}%";
             }
             else if (_target == null)
             {
