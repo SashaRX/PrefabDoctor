@@ -859,7 +859,7 @@ namespace SashaRX.PrefabDoctor
                 _gameObjectListView.itemsSource = filtered;
             }
 
-            _gameObjectListView.RefreshItems();
+            _gameObjectListView.Rebuild();
 
             int count = (_gameObjectListView.itemsSource as System.Collections.IList)?.Count ?? 0;
             if (_selectedGoIndex >= count) _selectedGoIndex = -1;
@@ -1574,7 +1574,7 @@ namespace SashaRX.PrefabDoctor
                     SetDisplay(_instanceListView, false);
                     SetDisplay(_backButton, false);
                     _conflictListView.itemsSource = _conflictRows;
-                    _conflictListView.RefreshItems();
+                    _conflictListView.Rebuild();
                     PushSelectionToListView();
                     UpdateBatchBar();
                     RefreshConflictHeader();
@@ -1604,7 +1604,7 @@ namespace SashaRX.PrefabDoctor
             SetDisplay(_conflictListView, true);
             SetDisplay(_instanceListView, false);
             _conflictListView.itemsSource = _conflictRows;
-            _conflictListView.RefreshItems();
+            _conflictListView.Rebuild();
             PushSelectionToListView();
             UpdateBatchBar();
             RefreshConflictHeader();
