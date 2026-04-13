@@ -880,54 +880,59 @@ namespace SashaRX.PrefabDoctor
         private void BuildPrefabGroups()
         {
             _prefabGroups = new List<PrefabTypeGroup>();
-            if (_report?.AssetToInstances == null) return;
+            if (_report?.AssetToInstances == null || _report.InstanceToAsset == null
+                || _report.GoPathToInstanceRoot == null) return;
 
+            // Step 1: create one group per asset path (O(K) where K = unique assets)
+            var groupMap = new Dictionary<string, PrefabTypeGroup>();
             foreach (var kvp in _report.AssetToInstances)
             {
-                string assetPath = kvp.Key;
-                var instances = kvp.Value;
-
                 var group = new PrefabTypeGroup
                 {
-                    AssetPath = assetPath,
-                    DisplayName = System.IO.Path.GetFileNameWithoutExtension(assetPath),
-                    Instances = instances
+                    AssetPath = kvp.Key,
+                    DisplayName = System.IO.Path.GetFileNameWithoutExtension(kvp.Key),
+                    Instances = kvp.Value
                 };
+                groupMap[kvp.Key] = group;
+            }
 
-                // Collect all GameObjectReports belonging to instances of this prefab
-                foreach (var goReport in _report.GameObjects)
+            // Step 2: single pass over all GameObjectReports — O(M)
+            // Each GO resolves to an instance root → asset path → group.
+            foreach (var goReport in _report.GameObjects)
+            {
+                if (!_report.GoPathToInstanceRoot.TryGetValue(
+                        goReport.RelativePath, out var instRoot)
+                    || instRoot == null) continue;
+
+                if (!_report.InstanceToAsset.TryGetValue(instRoot, out var assetPath))
+                    continue;
+
+                if (!groupMap.TryGetValue(assetPath, out var group))
+                    continue;
+
+                // Quick filter check — does this GO have any matching conflicts?
+                bool hasMatch = false;
+                foreach (var c in goReport.Conflicts)
                 {
-                    if (_report.GoPathToInstanceRoot != null
-                        && _report.GoPathToInstanceRoot.TryGetValue(
-                            goReport.RelativePath, out var instRoot)
-                        && instances.Contains(instRoot))
-                    {
-                        // Check if any conflicts pass the current filter
-                        bool hasMatchingConflicts = false;
-                        foreach (var c in goReport.Conflicts)
-                        {
-                            if (PassesFilter(c))
-                            {
-                                hasMatchingConflicts = true;
-                                break;
-                            }
-                        }
-                        if (!hasMatchingConflicts) continue;
-
-                        group.ChildReports.Add(goReport);
-                        group.TotalConflicts += goReport.Conflicts.Count;
-                        group.PingPongCount += goReport.PingPongCount;
-                        group.MultiOverrideCount += goReport.MultiOverrideCount;
-                        group.OrphanCount += goReport.OrphanCount;
-                        group.InsignificantCount += goReport.InsignificantCount;
-                    }
+                    if (PassesFilter(c)) { hasMatch = true; break; }
                 }
+                if (!hasMatch) continue;
 
+                group.ChildReports.Add(goReport);
+                group.TotalConflicts += goReport.Conflicts.Count;
+                group.PingPongCount += goReport.PingPongCount;
+                group.MultiOverrideCount += goReport.MultiOverrideCount;
+                group.OrphanCount += goReport.OrphanCount;
+                group.InsignificantCount += goReport.InsignificantCount;
+            }
+
+            // Step 3: collect non-empty groups + sort
+            foreach (var group in groupMap.Values)
+            {
                 if (group.ChildReports.Count > 0)
                     _prefabGroups.Add(group);
             }
 
-            // Sort: worst first
             _prefabGroups.Sort(static (a, b) =>
                 string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase));
         }
