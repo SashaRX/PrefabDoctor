@@ -54,6 +54,10 @@ namespace SashaRX.PrefabDoctor
         // left panel to show one entry per prefab asset (not per child GO).
         private List<PrefabTypeGroup> _prefabGroups;
 
+        // Drill-down: when user clicks an instance in the right panel,
+        // we show that instance's conflict details. Null = showing instance list.
+        private GameObject _drillDownInstance;
+
         // UI state
         private int _selectedGoIndex = -1;
 
@@ -822,6 +826,7 @@ namespace SashaRX.PrefabDoctor
             int idx = _gameObjectListView.selectedIndex;
             if (idx == _selectedGoIndex) return;
             _selectedGoIndex = idx;
+            _drillDownInstance = null; // reset drill-down on new selection
 
             RebuildConflictList();
 
@@ -1149,11 +1154,69 @@ namespace SashaRX.PrefabDoctor
             int idx = _instanceListView.selectedIndex;
             if (idx < 0 || idx >= _instanceRows.Count) return;
             var (instRoot, _2) = _instanceRows[idx];
-            if (instRoot != null)
+            if (instRoot == null) return;
+
+            // Ping the instance
+            EditorGUIUtility.PingObject(instRoot);
+            Selection.activeGameObject = instRoot;
+
+            // Drill down: show this instance's conflicts in the conflict table
+            _drillDownInstance = instRoot;
+            DrillDownToInstance(instRoot);
+        }
+
+        /// <summary>
+        /// Show conflicts for a specific scene instance in the conflict table.
+        /// Called when user clicks an instance in the instance list.
+        /// </summary>
+        private void DrillDownToInstance(GameObject instanceRoot)
+        {
+            if (_report == null || _prefabGroups == null
+                || _selectedGoIndex < 0 || _selectedGoIndex >= _prefabGroups.Count) return;
+
+            var group = _prefabGroups[_selectedGoIndex];
+            _conflictRows.Clear();
+
+            // Find all GameObjectReports belonging to this instance
+            foreach (var goReport in group.ChildReports)
             {
-                EditorGUIUtility.PingObject(instRoot);
-                Selection.activeGameObject = instRoot;
+                if (_report.GoPathToInstanceRoot != null
+                    && _report.GoPathToInstanceRoot.TryGetValue(
+                        goReport.RelativePath, out var instRoot)
+                    && instRoot == instanceRoot)
+                {
+                    int canonicalGoIndex = GetCanonicalGoIndex(goReport);
+                    if (canonicalGoIndex < 0) continue;
+
+                    for (int i = 0; i < goReport.Conflicts.Count; i++)
+                    {
+                        var c = goReport.Conflicts[i];
+                        if (!PassesFilter(c)) continue;
+                        _conflictRows.Add(new ConflictRow(
+                            new ConflictHandle(canonicalGoIndex, i), c, goReport));
+                    }
+                }
             }
+
+            // Switch to conflict table view
+            SetDisplay(_instanceListView, false);
+            SetDisplay(_conflictListView, true);
+            _conflictListView.itemsSource = _conflictRows;
+            _conflictListView.RefreshItems();
+            PushSelectionToListView();
+            UpdateBatchBar();
+
+            // Update header + show Back button
+            SetDisplay(_backButton, true);
+            if (_conflictHeaderLabel != null)
+            {
+                _conflictHeaderLabel.text =
+                    $"{instanceRoot.name} — {_conflictRows.Count} overrides";
+                _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+                _conflictHeaderLabel.style.color = new Color(0.9f, 0.9f, 0.9f);
+            }
+            if (_conflictHeaderPingButton != null)
+                _conflictHeaderPingButton.style.display = DisplayStyle.Flex;
         }
 
         private Label MakeLabelCell()
@@ -1285,10 +1348,18 @@ namespace SashaRX.PrefabDoctor
             lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
         }
 
+        private Button _backButton;
+
         private VisualElement BuildConflictHeader()
         {
             var header = new VisualElement();
             header.AddToClassList("pd-conflict-header");
+
+            _backButton = new Button(OnBackClicked) { text = "← Back" };
+            _backButton.style.flexShrink = 0;
+            _backButton.style.display = DisplayStyle.None;
+            _backButton.style.color = new Color(0.6f, 0.85f, 1f);
+            header.Add(_backButton);
 
             _conflictHeaderLabel = new Label();
             _conflictHeaderLabel.AddToClassList("pd-conflict-header-label");
@@ -1300,6 +1371,12 @@ namespace SashaRX.PrefabDoctor
             header.Add(_conflictHeaderPingButton);
 
             return header;
+        }
+
+        private void OnBackClicked()
+        {
+            _drillDownInstance = null;
+            RebuildConflictList(); // goes back to instance list
         }
 
         private void OnHeaderPingClicked()
@@ -1512,9 +1589,18 @@ namespace SashaRX.PrefabDoctor
                         string.Compare(a.root?.name, b.root?.name,
                             StringComparison.OrdinalIgnoreCase));
 
+                    // If drill-down is active, show that instance's conflicts
+                    if (_drillDownInstance != null)
+                    {
+                        DrillDownToInstance(_drillDownInstance);
+                        SetDisplay(_backButton, true);
+                        return;
+                    }
+
                     // Show instance list, hide conflict table
                     SetDisplay(_conflictListView, false);
                     SetDisplay(_instanceListView, true);
+                    SetDisplay(_backButton, false);
                     _instanceListView.itemsSource = _instanceRows;
                     _instanceListView.RefreshItems();
                     RefreshConflictHeader();
