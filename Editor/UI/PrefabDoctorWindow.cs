@@ -54,9 +54,7 @@ namespace SashaRX.PrefabDoctor
         // left panel to show one entry per prefab asset (not per child GO).
         private List<PrefabTypeGroup> _prefabGroups;
 
-        // Drill-down: when user clicks an instance in the right panel,
-        // we show that instance's conflict details. Null = showing instance list.
-        private GameObject _drillDownInstance;
+
 
         // UI state
         private int _selectedGoIndex = -1;
@@ -770,23 +768,15 @@ namespace SashaRX.PrefabDoctor
             var nameLabel = row.Q<Label>("name");
             var countsLabel = row.Q<Label>("counts");
 
-            // Hierarchy mode: left panel shows PrefabTypeGroups
-            if (_report != null && _report.IsHierarchyMode && _prefabGroups != null)
+            // Hierarchy mode: left panel shows instances directly
+            if (_report != null && _report.IsHierarchyMode)
             {
-                if (index < 0 || index >= _prefabGroups.Count) return;
-                var group = _prefabGroups[index];
-
-                Color dotColor;
-                if (group.PingPongCount > 0) dotColor = new Color(1f, 0.3f, 0.3f);
-                else if (group.MultiOverrideCount > 0) dotColor = new Color(1f, 0.75f, 0.2f);
-                else if (group.OrphanCount > 0) dotColor = new Color(0.6f, 0.6f, 0.6f);
-                else dotColor = new Color(0.5f, 0.8f, 1f);
-                dot.style.backgroundColor = dotColor;
-
-                nameLabel.text = $"{group.DisplayName} ({group.Instances.Count})";
-                nameLabel.tooltip = group.AssetPath;
-
-                countsLabel.text = $"{group.TotalConflicts} ovr";
+                if (index < 0 || index >= _instanceRows.Count) return;
+                var (instRoot, ovrCount) = _instanceRows[index];
+                dot.style.backgroundColor = new Color(0.5f, 0.8f, 1f);
+                nameLabel.text = instRoot != null ? instRoot.name : "(null)";
+                nameLabel.tooltip = instRoot != null ? instRoot.name : "";
+                countsLabel.text = $"{ovrCount} ovr";
                 return;
             }
 
@@ -828,18 +818,19 @@ namespace SashaRX.PrefabDoctor
             int idx = _gameObjectListView.selectedIndex;
             if (idx == _selectedGoIndex) return;
             _selectedGoIndex = idx;
-            _drillDownInstance = null; // reset drill-down on new selection
-
             RebuildConflictList();
 
             if (!_autoPing || idx < 0) return;
 
-            // Hierarchy mode: selecting a prefab type group — no ping
-            // (it's an asset type, not a specific scene instance).
-            // Ping happens when clicking a ROW in the right panel.
+            // Hierarchy mode: ping the selected instance in the scene
             if (_report != null && _report.IsHierarchyMode
-                && _prefabGroups != null && idx < _prefabGroups.Count)
+                && idx < _instanceRows.Count)
+            {
+                var (instRoot, _2) = _instanceRows[idx];
+                if (instRoot != null)
+                    EditorGUIUtility.PingObject(instRoot);
                 return;
+            }
 
             // Instance mode: ping the scene object
             var filtered = GetFilteredGameObjects();
@@ -854,11 +845,12 @@ namespace SashaRX.PrefabDoctor
         {
             if (_gameObjectListView == null) return;
 
-            // Hierarchy mode: show PrefabTypeGroups
+            // Hierarchy mode: show instances directly in the left panel.
+            // Each row = one scene prefab instance with its override count.
             if (_report != null && _report.IsHierarchyMode)
             {
-                BuildPrefabGroups();
-                _gameObjectListView.itemsSource = _prefabGroups;
+                BuildInstanceRows();
+                _gameObjectListView.itemsSource = _instanceRows;
             }
             else
             {
@@ -940,6 +932,44 @@ namespace SashaRX.PrefabDoctor
 
             _prefabGroups.Sort(static (a, b) =>
                 string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Build the flat instance list for the LEFT panel in hierarchy mode.
+        /// Each row = one scene prefab instance with its filtered override count.
+        /// </summary>
+        private void BuildInstanceRows()
+        {
+            _instanceRows.Clear();
+            if (_report?.HierarchyInstanceRoots == null
+                || _report.GoPathToInstanceRoot == null) return;
+
+            // Count filtered overrides per instance root.
+            var perInstance = new Dictionary<GameObject, int>();
+            foreach (var inst in _report.HierarchyInstanceRoots)
+                perInstance.TryAdd(inst, 0);
+
+            foreach (var goReport in _report.GameObjects)
+            {
+                if (!_report.GoPathToInstanceRoot.TryGetValue(
+                        goReport.RelativePath, out var instRoot)
+                    || !perInstance.ContainsKey(instRoot)) continue;
+
+                int filtered = 0;
+                foreach (var c in goReport.Conflicts)
+                    if (PassesFilter(c)) filtered++;
+                perInstance[instRoot] += filtered;
+            }
+
+            foreach (var kvp in perInstance)
+            {
+                if (kvp.Value > 0)
+                    _instanceRows.Add((kvp.Key, kvp.Value));
+            }
+
+            _instanceRows.Sort((a, b) =>
+                string.Compare(a.root?.name, b.root?.name,
+                    StringComparison.OrdinalIgnoreCase));
         }
 
         // ── Empty state (UI Toolkit) ───────────────────────────────
@@ -1153,77 +1183,37 @@ namespace SashaRX.PrefabDoctor
 
         private void OnInstanceListSelectionChanged(IEnumerable<object> _)
         {
-            int idx = _instanceListView.selectedIndex;
-            if (idx < 0 || idx >= _instanceRows.Count) return;
-            var (instRoot, _2) = _instanceRows[idx];
-            if (instRoot == null) return;
-
-            // Ping the instance
-            EditorGUIUtility.PingObject(instRoot);
-            Selection.activeGameObject = instRoot;
-
-            // Drill down: show this instance's conflicts in the conflict table
-            _drillDownInstance = instRoot;
-            DrillDownToInstance(instRoot);
+            // Instance list in the right panel is no longer used in hierarchy mode
+            // (instances are shown directly in the left panel). This callback is
+            // kept for non-hierarchy flows that may still use the right-panel list.
         }
 
         /// <summary>
-        /// Show conflicts for a specific scene instance in the conflict table.
-        /// Called when user clicks an instance in the instance list.
+        /// Populate _conflictRows with all conflicts belonging to a single
+        /// scene instance. Scans ALL GoReports, matching via GoPathToInstanceRoot.
         /// </summary>
-        private void DrillDownToInstance(GameObject instanceRoot)
+        private void LoadConflictsForInstance(GameObject instanceRoot)
         {
-            if (_report == null || _prefabGroups == null
-                || _selectedGoIndex < 0 || _selectedGoIndex >= _prefabGroups.Count) return;
-
-            // Clear all selections — drill-down mixes rows from multiple
-            // GoReportIndexes, so the single-index selection sync doesn't
-            // apply. Start fresh to avoid stale hidden handles.
-            _selectedConflicts.Clear();
-
-            var group = _prefabGroups[_selectedGoIndex];
             _conflictRows.Clear();
+            if (_report?.GoPathToInstanceRoot == null) return;
 
-            // Find all GameObjectReports belonging to this instance
-            foreach (var goReport in group.ChildReports)
+            foreach (var goReport in _report.GameObjects)
             {
-                if (_report.GoPathToInstanceRoot != null
-                    && _report.GoPathToInstanceRoot.TryGetValue(
+                if (!_report.GoPathToInstanceRoot.TryGetValue(
                         goReport.RelativePath, out var instRoot)
-                    && instRoot == instanceRoot)
-                {
-                    int canonicalGoIndex = GetCanonicalGoIndex(goReport);
-                    if (canonicalGoIndex < 0) continue;
+                    || instRoot != instanceRoot) continue;
 
-                    for (int i = 0; i < goReport.Conflicts.Count; i++)
-                    {
-                        var c = goReport.Conflicts[i];
-                        if (!PassesFilter(c)) continue;
-                        _conflictRows.Add(new ConflictRow(
-                            new ConflictHandle(canonicalGoIndex, i), c, goReport));
-                    }
+                int canonicalGoIndex = GetCanonicalGoIndex(goReport);
+                if (canonicalGoIndex < 0) continue;
+
+                for (int i = 0; i < goReport.Conflicts.Count; i++)
+                {
+                    var c = goReport.Conflicts[i];
+                    if (!PassesFilter(c)) continue;
+                    _conflictRows.Add(new ConflictRow(
+                        new ConflictHandle(canonicalGoIndex, i), c, goReport));
                 }
             }
-
-            // Switch to conflict table view
-            SetDisplay(_instanceListView, false);
-            SetDisplay(_conflictListView, true);
-            _conflictListView.itemsSource = _conflictRows;
-            _conflictListView.RefreshItems();
-            PushSelectionToListView();
-            UpdateBatchBar();
-
-            // Update header + show Back button
-            SetDisplay(_backButton, true);
-            if (_conflictHeaderLabel != null)
-            {
-                _conflictHeaderLabel.text =
-                    $"{instanceRoot.name} — {_conflictRows.Count} overrides";
-                _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
-                _conflictHeaderLabel.style.color = new Color(0.9f, 0.9f, 0.9f);
-            }
-            if (_conflictHeaderPingButton != null)
-                _conflictHeaderPingButton.style.display = DisplayStyle.Flex;
         }
 
         private Label MakeLabelCell()
@@ -1382,13 +1372,23 @@ namespace SashaRX.PrefabDoctor
 
         private void OnBackClicked()
         {
-            _drillDownInstance = null;
-            RebuildConflictList(); // goes back to instance list
+            // Back button is no longer used in hierarchy mode (instances are
+            // in the left panel). Keep for potential future use.
+            RebuildConflictList();
         }
 
         private void OnHeaderPingClicked()
         {
             if (_report == null || _selectedGoIndex < 0) return;
+
+            // Hierarchy mode: ping the selected instance
+            if (_report.IsHierarchyMode && _selectedGoIndex < _instanceRows.Count)
+            {
+                var (instRoot, _) = _instanceRows[_selectedGoIndex];
+                if (instRoot != null) EditorGUIUtility.PingObject(instRoot);
+                return;
+            }
+
             var filtered = GetFilteredGameObjects();
             if (_selectedGoIndex >= filtered.Count) return;
             var go = filtered[_selectedGoIndex];
@@ -1438,19 +1438,18 @@ namespace SashaRX.PrefabDoctor
                 return;
             }
 
-            // Hierarchy mode: show prefab type + instance count
-            if (_report.IsHierarchyMode && _prefabGroups != null
-                && _selectedGoIndex < _prefabGroups.Count)
+            // Hierarchy mode: show selected instance name + conflict count
+            if (_report.IsHierarchyMode
+                && _selectedGoIndex >= 0 && _selectedGoIndex < _instanceRows.Count)
             {
-                var group = _prefabGroups[_selectedGoIndex];
-                int totalOvr = 0;
-                foreach (var (_, cnt) in _instanceRows) totalOvr += cnt;
+                var (instRoot, _) = _instanceRows[_selectedGoIndex];
+                string name = instRoot != null ? instRoot.name : "(null)";
                 _conflictHeaderLabel.text =
-                    $"{group.DisplayName} — {group.Instances.Count} instances · "
-                    + $"{totalOvr} overrides";
+                    $"{name} — {_conflictRows.Count} overrides";
                 _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
                 _conflictHeaderLabel.style.color = new Color(0.9f, 0.9f, 0.9f);
-                _conflictHeaderPingButton.style.display = DisplayStyle.Flex;
+                _conflictHeaderPingButton.style.display =
+                    instRoot != null ? DisplayStyle.Flex : DisplayStyle.None;
                 return;
             }
 
@@ -1562,56 +1561,22 @@ namespace SashaRX.PrefabDoctor
 
             if (_report != null && _selectedGoIndex >= 0)
             {
-                // Hierarchy mode: selected item is a PrefabTypeGroup —
-                // show list of INSTANCES (one row per scene instance).
-                if (_report.IsHierarchyMode && _prefabGroups != null
-                    && _selectedGoIndex < _prefabGroups.Count)
+                // Hierarchy mode: selected item is an instance —
+                // show its conflicts in the right panel directly.
+                if (_report.IsHierarchyMode
+                    && _selectedGoIndex < _instanceRows.Count)
                 {
-                    var group = _prefabGroups[_selectedGoIndex];
+                    var (instanceRoot, _) = _instanceRows[_selectedGoIndex];
+                    if (instanceRoot != null)
+                        LoadConflictsForInstance(instanceRoot);
 
-                    // Count overrides per instance
-                    var perInstance = new Dictionary<GameObject, int>();
-                    foreach (var inst in group.Instances)
-                        perInstance[inst] = 0;
-
-                    foreach (var goReport in group.ChildReports)
-                    {
-                        if (_report.GoPathToInstanceRoot != null
-                            && _report.GoPathToInstanceRoot.TryGetValue(
-                                goReport.RelativePath, out var instRoot)
-                            && perInstance.ContainsKey(instRoot))
-                        {
-                            int filtered = 0;
-                            foreach (var c in goReport.Conflicts)
-                                if (PassesFilter(c)) filtered++;
-                            perInstance[instRoot] += filtered;
-                        }
-                    }
-
-                    foreach (var kvp in perInstance)
-                    {
-                        if (kvp.Value > 0)
-                            _instanceRows.Add((kvp.Key, kvp.Value));
-                    }
-
-                    _instanceRows.Sort((a, b) =>
-                        string.Compare(a.root?.name, b.root?.name,
-                            StringComparison.OrdinalIgnoreCase));
-
-                    // If drill-down is active, show that instance's conflicts
-                    if (_drillDownInstance != null)
-                    {
-                        DrillDownToInstance(_drillDownInstance);
-                        SetDisplay(_backButton, true);
-                        return;
-                    }
-
-                    // Show instance list, hide conflict table
-                    SetDisplay(_conflictListView, false);
-                    SetDisplay(_instanceListView, true);
+                    SetDisplay(_conflictListView, true);
+                    SetDisplay(_instanceListView, false);
                     SetDisplay(_backButton, false);
-                    _instanceListView.itemsSource = _instanceRows;
-                    _instanceListView.RefreshItems();
+                    _conflictListView.itemsSource = _conflictRows;
+                    _conflictListView.RefreshItems();
+                    PushSelectionToListView();
+                    UpdateBatchBar();
                     RefreshConflictHeader();
                     return;
                 }
