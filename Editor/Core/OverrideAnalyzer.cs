@@ -647,11 +647,16 @@ namespace SashaRX.PrefabDoctor
 
                 report.HierarchyInstanceRoots.Add(instanceRoot);
 
-                // Map instance → source asset for UI grouping.
-                var sourceObj = PrefabUtility.GetCorrespondingObjectFromSource(instanceRoot);
-                if (sourceObj != null)
+                var chain = BuildChainCached(instanceRoot, chainTemplateCache);
+
+                // Map instance → BASE prefab asset (chain[0] after reversal)
+                // for UI grouping by prefab type. Using the base asset path
+                // instead of GetCorrespondingObjectFromSource ensures
+                // AirCon_01 instances group under "AirCon_01.prefab", not
+                // under the intermediate parent prefab.
+                if (chain.Count >= 2 && !chain[0].IsSceneInstance)
                 {
-                    string srcPath = AssetDatabase.GetAssetPath(sourceObj);
+                    string srcPath = chain[0].AssetPath;
                     if (!string.IsNullOrEmpty(srcPath))
                     {
                         report.InstanceToAsset[instanceRoot] = srcPath;
@@ -663,8 +668,6 @@ namespace SashaRX.PrefabDoctor
                         instList.Add(instanceRoot);
                     }
                 }
-
-                var chain = BuildChainCached(instanceRoot, chainTemplateCache);
 
                 foreach (var level in chain)
                     if (!string.IsNullOrEmpty(level.AssetPath) && !level.IsSceneInstance)
