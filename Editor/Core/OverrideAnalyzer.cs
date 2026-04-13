@@ -709,10 +709,9 @@ namespace SashaRX.PrefabDoctor
                 // chain[last] avoids lumping all nested variants under a
                 // single shared base asset (e.g. one FBX at the bottom).
                 // chain[0] = scene instance, chain[1] = direct source prefab.
-                var sourceLevel = chain[1];
-                if (chain.Count >= 2 && !sourceLevel.IsSceneInstance)
+                if (chain.Count >= 2 && !chain[1].IsSceneInstance)
                 {
-                    string srcPath = sourceLevel.AssetPath;
+                    string srcPath = chain[1].AssetPath;
                     if (!string.IsNullOrEmpty(srcPath))
                     {
                         report.InstanceToAsset[instanceRoot] = srcPath;
