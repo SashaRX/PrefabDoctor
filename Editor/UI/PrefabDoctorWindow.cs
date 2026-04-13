@@ -1334,8 +1334,25 @@ namespace SashaRX.PrefabDoctor
             if (index < 0 || index >= _conflictRows.Count) { lbl.text = ""; return; }
             var row = _conflictRows[index];
             lbl.userData = index;
-            lbl.text = string.Join(" → ", row.Conflict.Overrides.Select(o =>
-                $"D{o.Depth}:{TruncateValue(o.Value, 12)}"));
+
+            var overrides = row.Conflict.Overrides;
+            if (overrides.Count <= 5)
+            {
+                lbl.text = string.Join(" → ", overrides.Select(o =>
+                    $"D{o.Depth}:{TruncateValue(o.Value, 12)}"));
+            }
+            else
+            {
+                // Collapse: show first 2, count, last 2
+                var sb = new System.Text.StringBuilder();
+                sb.Append($"D{overrides[0].Depth}:{TruncateValue(overrides[0].Value, 12)}");
+                sb.Append($" → D{overrides[1].Depth}:{TruncateValue(overrides[1].Value, 12)}");
+                sb.Append($" → …({overrides.Count} levels)… → ");
+                var last = overrides[overrides.Count - 1];
+                sb.Append($"D{last.Depth}:{TruncateValue(last.Value, 12)}");
+                lbl.text = sb.ToString();
+            }
+
             lbl.style.color = new Color(0.8f, 0.8f, 0.8f);
             lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
         }
