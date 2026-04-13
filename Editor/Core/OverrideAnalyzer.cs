@@ -73,8 +73,36 @@ namespace SashaRX.PrefabDoctor
         // merge them into the per-instance map with a cheap loop instead of
         // re-running GetPropertyModifications + ProcessMod for every
         // instance of the same prefab.
+        //
+        // PERSISTENT across runs — prefab asset overrides don't change unless
+        // the asset is modified. Invalidated by projectChanged event.
         private readonly Dictionary<int, List<(PropertyKey key, OverrideEntry entry)>>
             _processedModsCache = new();
+        private bool _processedModsCacheDirty = true;
+
+        /// <summary>
+        /// Register for Editor events to invalidate persistent caches.
+        /// Called from the window's OnEnable.
+        /// </summary>
+        public void RegisterCacheInvalidation()
+        {
+            EditorApplication.projectChanged -= OnProjectChanged;
+            EditorApplication.projectChanged += OnProjectChanged;
+        }
+
+        /// <summary>
+        /// Unregister cache invalidation events.
+        /// Called from the window's OnDisable.
+        /// </summary>
+        public void UnregisterCacheInvalidation()
+        {
+            EditorApplication.projectChanged -= OnProjectChanged;
+        }
+
+        private void OnProjectChanged()
+        {
+            _processedModsCacheDirty = true;
+        }
 
         // Key base cache: MakeKey does GetType().Name (reflection) and
         // GetRelativePath (walks the whole transform parent chain + string
@@ -132,8 +160,16 @@ namespace SashaRX.PrefabDoctor
             _runIgnoredTypes = null;
             _goPathCache.Clear();
             _componentCache.Clear();
-            _processedModsCache.Clear();
             _keyBaseCache.Clear();
+
+            // _processedModsCache is PERSISTENT across runs for hierarchy mode.
+            // Prefab asset overrides (depth 1+) don't change between analyses
+            // unless the project changes. Only clear when invalidated.
+            if (_processedModsCacheDirty)
+            {
+                _processedModsCache.Clear();
+                _processedModsCacheDirty = false;
+            }
         }
 
         // ── Chain Building ─────────────────────────────────────────

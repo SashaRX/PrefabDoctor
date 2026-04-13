@@ -2289,6 +2289,7 @@ namespace SashaRX.PrefabDoctor
                 _target = PrefabUtility.GetOutermostPrefabInstanceRoot(Selection.activeGameObject);
             }
             EditorApplication.update += PumpScanJob;
+            _analyzer.RegisterCacheInvalidation();
         }
 
         private void OnDisable()
@@ -2314,6 +2315,7 @@ namespace SashaRX.PrefabDoctor
             // Release any SerializedObject handles the analyzer kept across
             // an incremental run that was abandoned by closing the window.
             _analyzer?.ClearSerializedObjectCache();
+            _analyzer?.UnregisterCacheInvalidation();
         }
 
         private void PumpScanJob()
