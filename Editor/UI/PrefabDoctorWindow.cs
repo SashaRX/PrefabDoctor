@@ -913,7 +913,11 @@ namespace SashaRX.PrefabDoctor
                     continue;
 
                 group.ChildReports.Add(goReport);
-                group.TotalConflicts += goReport.Conflicts.Count;
+                // Count only filtered conflicts for display
+                int filteredCount = 0;
+                foreach (var c in goReport.Conflicts)
+                    if (PassesFilter(c)) filteredCount++;
+                group.TotalConflicts += filteredCount;
                 group.PingPongCount += goReport.PingPongCount;
                 group.MultiOverrideCount += goReport.MultiOverrideCount;
                 group.OrphanCount += goReport.OrphanCount;
