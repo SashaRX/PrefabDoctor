@@ -2105,16 +2105,13 @@ namespace SashaRX.PrefabDoctor
                 return;
             }
 
-            // Advance the enumerator for up to 16ms per pump tick
-            // (inline progress bar, no modal dialog).
-            var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 16)
+            // Single MoveNext per editor frame — avoids "Hold on" dialog
+            // that Unity shows when an update callback takes too long.
+            if (!_hierarchyJob.MoveNext())
             {
-                if (!_hierarchyJob.MoveNext())
-                {
-                    _report = _pendingHierarchyReport;
-                    _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
-                    _selectedConflicts.Clear();
+                _report = _pendingHierarchyReport;
+                _selectedGoIndex = _report.GameObjects.Count > 0 ? 0 : -1;
+                _selectedConflicts.Clear();
 
                     // On a hierarchy run, pick the narrowest actionable
                     // filter the data supports, so the user is not hit
@@ -2148,11 +2145,10 @@ namespace SashaRX.PrefabDoctor
                         + $"{_report.TotalInsignificant} insignificant, "
                         + $"{_report.AnalysisTimeMs:F0}ms");
 
-                    RefreshAfterReportChange();
-                    return;
-                }
-                _progress = _hierarchyJob.Current;
+                RefreshAfterReportChange();
+                return;
             }
+            _progress = _hierarchyJob.Current;
             RefreshEmptyState();
         }
 
