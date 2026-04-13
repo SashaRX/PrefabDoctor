@@ -115,6 +115,7 @@ namespace SashaRX.PrefabDoctor
     {
         public string RelativePath;
         public GameObject Instance; // may be null if analyzing asset
+        public GameObject InstanceRoot; // hierarchy mode: scene PrefabInstance root
         public List<PropertyConflict> Conflicts = new();
 
         public int PingPongCount;

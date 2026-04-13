@@ -870,7 +870,7 @@ namespace SashaRX.PrefabDoctor
 
                 foreach (var conflict in conflicts)
                 {
-                    AddConflictToReport(goReports, conflict, report);
+                    AddConflictToReport(goReports, conflict, report, instanceRoot);
                     goPathToRoot.TryAdd(conflict.Key.GameObjectPath, instanceRoot);
                 }
             }
@@ -1427,13 +1427,24 @@ namespace SashaRX.PrefabDoctor
 
         private static void AddConflictToReport(
             Dictionary<string, GameObjectReport> goReports,
-            PropertyConflict conflict, AnalysisReport report)
+            PropertyConflict conflict, AnalysisReport report,
+            GameObject instanceRoot = null)
         {
             string goPath = conflict.Key.GameObjectPath;
-            if (!goReports.TryGetValue(goPath, out var goReport))
+            // In hierarchy mode, multiple instances can have the same
+            // GameObjectPath (duplicate sibling names). Use instanceRoot's
+            // ID as part of the key to keep them separate.
+            string key = instanceRoot != null
+                ? $"{instanceRoot.GetInstanceID()}:{goPath}"
+                : goPath;
+            if (!goReports.TryGetValue(key, out var goReport))
             {
-                goReport = new GameObjectReport { RelativePath = goPath };
-                goReports[goPath] = goReport;
+                goReport = new GameObjectReport
+                {
+                    RelativePath = goPath,
+                    InstanceRoot = instanceRoot
+                };
+                goReports[key] = goReport;
             }
 
             goReport.Conflicts.Add(conflict);

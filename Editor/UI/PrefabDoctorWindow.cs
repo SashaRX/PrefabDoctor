@@ -941,8 +941,7 @@ namespace SashaRX.PrefabDoctor
         private void BuildInstanceRows()
         {
             _instanceRows.Clear();
-            if (_report?.HierarchyInstanceRoots == null
-                || _report.GoPathToInstanceRoot == null) return;
+            if (_report?.HierarchyInstanceRoots == null) return;
 
             // Count filtered overrides per instance root.
             var perInstance = new Dictionary<GameObject, int>();
@@ -951,9 +950,8 @@ namespace SashaRX.PrefabDoctor
 
             foreach (var goReport in _report.GameObjects)
             {
-                if (!_report.GoPathToInstanceRoot.TryGetValue(
-                        goReport.RelativePath, out var instRoot)
-                    || !perInstance.ContainsKey(instRoot)) continue;
+                var instRoot = goReport.InstanceRoot;
+                if (instRoot == null || !perInstance.ContainsKey(instRoot)) continue;
 
                 int filtered = 0;
                 foreach (var c in goReport.Conflicts)
@@ -1190,18 +1188,16 @@ namespace SashaRX.PrefabDoctor
 
         /// <summary>
         /// Populate _conflictRows with all conflicts belonging to a single
-        /// scene instance. Scans ALL GoReports, matching via GoPathToInstanceRoot.
+        /// scene instance. Scans ALL GoReports, matching via InstanceRoot field.
         /// </summary>
         private void LoadConflictsForInstance(GameObject instanceRoot)
         {
             _conflictRows.Clear();
-            if (_report?.GoPathToInstanceRoot == null) return;
+            if (_report == null) return;
 
             foreach (var goReport in _report.GameObjects)
             {
-                if (!_report.GoPathToInstanceRoot.TryGetValue(
-                        goReport.RelativePath, out var instRoot)
-                    || instRoot != instanceRoot) continue;
+                if (goReport.InstanceRoot != instanceRoot) continue;
 
                 int canonicalGoIndex = GetCanonicalGoIndex(goReport);
                 if (canonicalGoIndex < 0) continue;
