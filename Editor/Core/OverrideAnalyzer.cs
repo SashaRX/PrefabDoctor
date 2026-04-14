@@ -705,23 +705,31 @@ namespace SashaRX.PrefabDoctor
                 var chain = BuildChainCached(instanceRoot, chainTemplateCache);
 
                 // Map instance → the prefab asset it IS (not where it lives).
-                // GetCorrespondingObjectFromSource gives the immediate prefab
-                // this instance was created from (e.g. AirCon_01.prefab), while
-                // chain[1] gives the parent prefab that CONTAINS it (Level.prefab).
-                var source = PrefabUtility.GetCorrespondingObjectFromSource(instanceRoot);
-                if (source != null)
+                // Walk the chain to find the first level where Root is the
+                // root of its own asset (transform == transform.root).
+                // For nested instances (Plank_01 inside SovietBuilding),
+                // chain[1].Root is a child of SovietBuilding.prefab — skip.
+                // chain[2].Root is the root of Plank_01.prefab — use that.
+                string srcPath = null;
+                for (int c = 1; c < chain.Count; c++)
                 {
-                    string srcPath = AssetDatabase.GetAssetPath(source);
-                    if (!string.IsNullOrEmpty(srcPath))
+                    var lvl = chain[c];
+                    if (lvl.Root != null && !lvl.IsSceneInstance
+                        && lvl.Root.transform == lvl.Root.transform.root)
                     {
-                        report.InstanceToAsset[instanceRoot] = srcPath;
-                        if (!report.AssetToInstances.TryGetValue(srcPath, out var instList))
-                        {
-                            instList = new List<GameObject>();
-                            report.AssetToInstances[srcPath] = instList;
-                        }
-                        instList.Add(instanceRoot);
+                        srcPath = lvl.AssetPath;
+                        break;
                     }
+                }
+                if (!string.IsNullOrEmpty(srcPath))
+                {
+                    report.InstanceToAsset[instanceRoot] = srcPath;
+                    if (!report.AssetToInstances.TryGetValue(srcPath, out var instList))
+                    {
+                        instList = new List<GameObject>();
+                        report.AssetToInstances[srcPath] = instList;
+                    }
+                    instList.Add(instanceRoot);
                 }
 
                 foreach (var level in chain)
