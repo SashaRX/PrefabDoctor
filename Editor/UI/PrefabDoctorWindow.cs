@@ -143,7 +143,7 @@ namespace SashaRX.PrefabDoctor
         // when a prefab type group is selected on the left)
         private ListView _instanceListView;
         private List<(GameObject root, int overrideCount)> _instanceRows = new();
-        private readonly List<(GameObject root, string hierarchyPath, int overrideCount)> _groupInstanceRows = new();
+        private readonly List<(GameObject root, string hierarchyPath, string displayLabel, int overrideCount)> _groupInstanceRows = new();
         private PrefabTypeGroup _activeGroupForRightPanel;
 
         // Empty state
@@ -1255,12 +1255,12 @@ namespace SashaRX.PrefabDoctor
                 bindItem = (row, idx) =>
                 {
                     if (idx < 0 || idx >= _groupInstanceRows.Count) return;
-                    var (instRoot, hierarchyPath, ovrCount) = _groupInstanceRows[idx];
+                    var (instRoot, hierarchyPath, displayLabel, ovrCount) = _groupInstanceRows[idx];
                     var dot = row.Q<VisualElement>("dot");
                     var lbl = row.Q<Label>("name");
                     var cnt = row.Q<Label>("counts");
                     dot.style.backgroundColor = new Color(0.5f, 0.8f, 1f);
-                    lbl.text = instRoot != null ? instRoot.name : "(null)";
+                    lbl.text = displayLabel;
                     lbl.tooltip = hierarchyPath;
                     cnt.text = $"{ovrCount} ovr";
                 }
@@ -1279,7 +1279,7 @@ namespace SashaRX.PrefabDoctor
             int idx = _instanceListView.selectedIndex;
             if (idx < 0 || idx >= _groupInstanceRows.Count) return;
 
-            var (instanceRoot, _, _) = _groupInstanceRows[idx];
+            var (instanceRoot, _, _, _) = _groupInstanceRows[idx];
             if (instanceRoot == null) return;
 
             LoadConflictsForInstance(instanceRoot);
@@ -1676,7 +1676,7 @@ namespace SashaRX.PrefabDoctor
                     && _instanceListView.style.display == DisplayStyle.Flex)
                 {
                     _conflictHeaderLabel.text =
-                        $"{label} — {_groupInstanceRows.Count} problematic instances";
+                        $"{label} — {_groupInstanceRows.Count} problematic instances (tree)";
                 }
                 else
                 {
@@ -1907,7 +1907,16 @@ namespace SashaRX.PrefabDoctor
             {
                 int id = inst.GetInstanceID();
                 if (!perInstanceCounts.TryGetValue(id, out int count) || count <= 0) continue;
-                _groupInstanceRows.Add((inst, GetHierarchyPath(inst), count));
+                string hierarchyPath = GetHierarchyPath(inst);
+                int depth = 0;
+                for (int i = 0; i < hierarchyPath.Length; i++)
+                    if (hierarchyPath[i] == '/') depth++;
+
+                string displayLabel = depth > 0
+                    ? $"{new string(' ', depth * 2)}↳ {inst.name}   [{hierarchyPath}]"
+                    : $"{inst.name}   [{hierarchyPath}]";
+
+                _groupInstanceRows.Add((inst, hierarchyPath, displayLabel, count));
             }
 
             _groupInstanceRows.Sort((a, b) =>
