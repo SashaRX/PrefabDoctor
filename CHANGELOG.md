@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.6] - 2026-04-16
+
+### Changed
+- Conflict table now separates instance identity and object location into two columns: `Instance` and `Object Path`.
+- `Object Path` now uses a readable tail format (`…/Parent/Child`) with the full relative path preserved in tooltip for disambiguation.
+
 ## [0.2.5] - 2026-04-16
 
 ### Fixed
