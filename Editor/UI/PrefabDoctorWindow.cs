@@ -927,30 +927,70 @@ namespace SashaRX.PrefabDoctor
             if (_report?.HierarchyInstanceRoots == null) return;
 
             // Count filtered overrides per instance root.
-            var perInstance = new Dictionary<GameObject, int>();
+            var rootsById = new Dictionary<int, GameObject>();
+            var perInstance = new Dictionary<int, int>();
             foreach (var inst in _report.HierarchyInstanceRoots)
-                perInstance.TryAdd(inst, 0);
+            {
+                if (inst == null) continue;
+                int id = inst.GetInstanceID();
+                rootsById[id] = inst;
+                perInstance.TryAdd(id, 0);
+            }
 
             foreach (var goReport in _report.GameObjects)
             {
-                var instRoot = goReport.InstanceRoot;
-                if (instRoot == null || !perInstance.ContainsKey(instRoot)) continue;
+                int ownerId;
+                if (goReport.InstanceRoot != null)
+                {
+                    ownerId = goReport.InstanceRoot.GetInstanceID();
+                }
+                else if (!TryGetInstanceIdFromScopedKey(
+                    goReport.InstanceScopedPathKey, out ownerId))
+                {
+                    continue;
+                }
+                if (!perInstance.ContainsKey(ownerId)) continue;
 
                 int filtered = 0;
                 foreach (var c in goReport.Conflicts)
                     if (PassesFilter(c)) filtered++;
-                perInstance[instRoot] += filtered;
+                perInstance[ownerId] += filtered;
             }
 
             foreach (var kvp in perInstance)
             {
-                if (kvp.Value > 0)
-                    _instanceRows.Add((kvp.Key, kvp.Value));
+                if (kvp.Value <= 0) continue;
+                if (!rootsById.TryGetValue(kvp.Key, out var instRoot) || instRoot == null) continue;
+                _instanceRows.Add((instRoot, kvp.Value));
             }
 
             _instanceRows.Sort((a, b) =>
                 string.Compare(a.root?.name, b.root?.name,
                     StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool TryGetInstanceIdFromScopedKey(
+            string instanceScopedPathKey, out int instanceId)
+        {
+            instanceId = 0;
+            if (string.IsNullOrEmpty(instanceScopedPathKey)) return false;
+
+            int colon = instanceScopedPathKey.IndexOf(':');
+            if (colon <= 0) return false;
+
+            return int.TryParse(instanceScopedPathKey[..colon], out instanceId);
+        }
+
+        private static bool BelongsToInstance(GameObjectReport goReport, int selectedInstanceId)
+        {
+            if (goReport == null) return false;
+            if (goReport.InstanceRoot != null
+                && goReport.InstanceRoot.GetInstanceID() == selectedInstanceId)
+                return true;
+
+            return TryGetInstanceIdFromScopedKey(
+                goReport.InstanceScopedPathKey, out var reportInstanceId)
+                && reportInstanceId == selectedInstanceId;
         }
 
         // ── Empty state (UI Toolkit) ───────────────────────────────
@@ -1177,10 +1217,12 @@ namespace SashaRX.PrefabDoctor
         {
             _conflictRows.Clear();
             if (_report == null) return;
+            if (instanceRoot == null) return;
+            int selectedInstanceId = instanceRoot.GetInstanceID();
 
             foreach (var goReport in _report.GameObjects)
             {
-                if (goReport.InstanceRoot != instanceRoot) continue;
+                if (!BelongsToInstance(goReport, selectedInstanceId)) continue;
 
                 int canonicalGoIndex = GetCanonicalGoIndex(goReport);
                 if (canonicalGoIndex < 0) continue;

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.3] - 2026-04-16
+
+### Fixed
+- Hierarchy right panel now filters conflicts strictly by selected scene instance (by instance-scoped key / instance ID), avoiding accidental mix from other instances.
+- Per-instance counters in the left list are now accumulated by instance ID from scoped keys, so counts stay bound to the correct selected instance.
+
 ## [0.2.2] - 2026-04-16
 
 ### Fixed
