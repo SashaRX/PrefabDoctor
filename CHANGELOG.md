@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.2.5] - 2026-04-16
+
+### Fixed
+- Restored row-level ping in hierarchy conflict table: row ping now resolves via the selected scene instance root first and then child-relative path, preventing accidental pinging outside scene context.
+
+## [0.2.4] - 2026-04-16
+
+### Fixed
+- Hierarchy left-panel selection now survives filter changes by selected instance identity (InstanceID), preventing index-based row drift and mixed-looking right-panel context.
+
+## [0.2.3] - 2026-04-16
+
+### Fixed
+- Hierarchy right panel now filters conflicts strictly by selected scene instance (by instance-scoped key / instance ID), avoiding accidental mix from other instances.
+- Per-instance counters in the left list are now accumulated by instance ID from scoped keys, so counts stay bound to the correct selected instance.
+
+## [0.2.2] - 2026-04-16
+
+### Fixed
+- Hierarchy mode left panel now lists concrete scene instances instead of only prefab-type groups, so selection and conflict browsing are anchored to the actual instance root.
+- Hierarchy conflict table selection sync now works against the full visible row set (multi-GameObject view), improving batch selection behavior.
+
+## [0.2.1] - 2026-04-15
+
+### Fixed
+- Hierarchy analysis UI/object resolution now uses an instance-scoped GameObject key (`instanceRootInstanceId:relativePath`) to avoid collisions when multiple prefab instances share identical relative paths.
+- Batch actions and ping now resolve conflicts through the same instance-scoped key, preventing rows from being bound to the first matching instance.
+
 ## [0.2.0] - 2026-04-10
 
 ### Added — Project Scanner

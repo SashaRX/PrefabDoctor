@@ -879,7 +879,8 @@ namespace SashaRX.PrefabDoctor
                 foreach (var conflict in conflicts)
                 {
                     AddConflictToReport(goReports, conflict, report, instanceRoot);
-                    goPathToRoot.TryAdd(conflict.Key.GameObjectPath, instanceRoot);
+                    var instanceScopedKey = MakeInstanceScopedPathKey(instanceRoot, conflict.Key.GameObjectPath);
+                    goPathToRoot.TryAdd(instanceScopedKey, instanceRoot);
                 }
             }
         }
@@ -1440,16 +1441,15 @@ namespace SashaRX.PrefabDoctor
         {
             string goPath = conflict.Key.GameObjectPath;
             // In hierarchy mode, multiple instances can have the same
-            // GameObjectPath (duplicate sibling names). Use instanceRoot's
-            // ID as part of the key to keep them separate.
-            string key = instanceRoot != null
-                ? $"{instanceRoot.GetInstanceID()}:{goPath}"
-                : goPath;
+            // GameObjectPath (duplicate sibling names). Scope the key by
+            // instanceRoot InstanceID so each row binds to its own owner.
+            string key = MakeInstanceScopedPathKey(instanceRoot, goPath);
             if (!goReports.TryGetValue(key, out var goReport))
             {
                 goReport = new GameObjectReport
                 {
                     RelativePath = goPath,
+                    InstanceScopedPathKey = key,
                     InstanceRoot = instanceRoot
                 };
                 goReports[key] = goReport;
@@ -1476,6 +1476,12 @@ namespace SashaRX.PrefabDoctor
                     report.TotalOrphan++;
                     break;
             }
+        }
+
+        private static string MakeInstanceScopedPathKey(GameObject instanceRoot, string goPath)
+        {
+            if (instanceRoot == null) return goPath;
+            return $"{instanceRoot.GetInstanceID()}:{goPath}";
         }
 
         // ── Generic helpers ────────────────────────────────────────

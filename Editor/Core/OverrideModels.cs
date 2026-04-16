@@ -114,6 +114,11 @@ namespace SashaRX.PrefabDoctor
     internal class GameObjectReport
     {
         public string RelativePath;
+        /// <summary>
+        /// Stable key for hierarchy mode: "instanceRootInstanceId:RelativePath".
+        /// In non-hierarchy mode equals <see cref="RelativePath"/>.
+        /// </summary>
+        public string InstanceScopedPathKey;
         public GameObject Instance; // may be null if analyzing asset
         public GameObject InstanceRoot; // hierarchy mode: scene PrefabInstance root
         public List<PropertyConflict> Conflicts = new();
@@ -156,7 +161,7 @@ namespace SashaRX.PrefabDoctor
         public List<GameObject> HierarchyInstanceRoots = new();
 
         /// <summary>
-        /// Mapping from <see cref="GameObjectReport.RelativePath"/> to the
+        /// Mapping from <see cref="GameObjectReport.InstanceScopedPathKey"/> to the
         /// PrefabInstance root that owns it. Populated only in hierarchy
         /// mode. Used by <c>ResolveBatchTasks</c> to dispatch each
         /// conflict to the correct nested instance root for
