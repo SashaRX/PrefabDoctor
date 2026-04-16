@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.2] - 2026-04-16
+
+### Fixed
+- Hierarchy mode left panel now lists concrete scene instances instead of only prefab-type groups, so selection and conflict browsing are anchored to the actual instance root.
+- Hierarchy conflict table selection sync now works against the full visible row set (multi-GameObject view), improving batch selection behavior.
+
 ## [0.2.1] - 2026-04-15
 
 ### Fixed
