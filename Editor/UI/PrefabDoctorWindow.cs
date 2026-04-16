@@ -1255,22 +1255,7 @@ namespace SashaRX.PrefabDoctor
 
         private void OnInstanceListSelectionChanged(IEnumerable<object> _)
         {
-            if (!IsGroupingByPrefabTypeActive()) return;
-            int idx = _instanceListView.selectedIndex;
-            if (idx < 0 || idx >= _groupInstanceRows.Count) return;
-
-            var (instanceRoot, _, _, _) = _groupInstanceRows[idx];
-            if (instanceRoot == null) return;
-
-            LoadConflictsForInstance(instanceRoot);
-            SetDisplay(_instanceListView, false);
-            SetDisplay(_conflictListView, true);
-            SetDisplay(_backButton, true);
-            _conflictListView.itemsSource = _conflictRows;
-            _conflictListView.Rebuild();
-            PushSelectionToListView();
-            UpdateBatchBar();
-            RefreshConflictHeader();
+            // Right-panel instance tree is disabled.
         }
 
         /// <summary>
@@ -1309,6 +1294,7 @@ namespace SashaRX.PrefabDoctor
         {
             _conflictRows.Clear();
             if (_report == null) return;
+            if (group == null || group.Instances == null) return;
 
             var instanceSet = new HashSet<GameObject>(group.Instances);
             foreach (var goReport in _report.GameObjects)
@@ -1502,17 +1488,6 @@ namespace SashaRX.PrefabDoctor
 
         private void OnBackClicked()
         {
-            if (IsGroupingByPrefabTypeActive() && _activeGroupForRightPanel != null)
-            {
-                LoadInstancesForGroup(_activeGroupForRightPanel);
-                SetDisplay(_instanceListView, true);
-                SetDisplay(_conflictListView, false);
-                SetDisplay(_backButton, false);
-                UpdateBatchBar();
-                RefreshConflictHeader();
-                return;
-            }
-
             RebuildConflictList();
         }
 
@@ -1660,7 +1635,7 @@ namespace SashaRX.PrefabDoctor
                     && _instanceListView.style.display == DisplayStyle.Flex)
                 {
                     _conflictHeaderLabel.text =
-                        $"{label} — {_groupInstanceRows.Count} problematic instances (tree)";
+                        $"{label} — {_groupInstanceRows.Count} problematic instances";
                 }
                 else
                 {
@@ -1794,22 +1769,23 @@ namespace SashaRX.PrefabDoctor
             if (_report != null && _selectedGoIndex >= 0)
             {
                 // Hierarchy mode + Group Types:
-                // left panel stays instance-based; right panel switches to
-                // prefab-type instance tree for the selected instance's asset.
+                // left panel stays instance-based; right panel shows all
+                // conflicts for the selected instance's prefab type.
                 if (IsGroupingByPrefabTypeActive()
                     && _report.IsHierarchyMode
                     && _selectedGoIndex < _instanceRows.Count)
                 {
                     var (selectedInstance, _) = _instanceRows[_selectedGoIndex];
                     var group = GetPrefabGroupForInstance(selectedInstance);
-                    LoadInstancesForGroup(group);
+                    _activeGroupForRightPanel = group;
+                    LoadConflictsForGroup(group);
 
-                    SetDisplay(_conflictListView, false);
-                    SetDisplay(_instanceListView, true);
+                    SetDisplay(_conflictListView, true);
+                    SetDisplay(_instanceListView, false);
                     SetDisplay(_backButton, false);
-                    _instanceListView.itemsSource = _groupInstanceRows;
-                    _instanceListView.Rebuild();
-                    _instanceListView.SetSelectionWithoutNotify(Array.Empty<int>());
+                    _conflictListView.itemsSource = _conflictRows;
+                    _conflictListView.Rebuild();
+                    PushSelectionToListView();
                     UpdateBatchBar();
                     RefreshConflictHeader();
                     return;
