@@ -785,18 +785,6 @@ namespace SashaRX.PrefabDoctor
             var nameLabel = row.Q<Label>("name");
             var countsLabel = row.Q<Label>("counts");
 
-            // Hierarchy mode + optional grouping: left panel shows prefab types.
-            if (IsGroupingByPrefabTypeActive())
-            {
-                if (index < 0 || index >= _prefabGroups.Count) return;
-                var group = _prefabGroups[index];
-                dot.style.backgroundColor = new Color(0.5f, 0.8f, 1f);
-                nameLabel.text = !string.IsNullOrEmpty(group.DisplayName) ? group.DisplayName : "(group)";
-                nameLabel.tooltip = group.AssetPath;
-                countsLabel.text = $"{group.TotalConflicts} ovr · {group.Instances.Count} inst";
-                return;
-            }
-
             // Hierarchy mode: left panel shows concrete scene instances.
             if (_report != null && _report.IsHierarchyMode)
             {
@@ -884,22 +872,14 @@ namespace SashaRX.PrefabDoctor
             // Each row = one scene PrefabInstance root.
             if (_report != null && _report.IsHierarchyMode)
             {
-                if (IsGroupingByPrefabTypeActive())
-                {
-                    BuildPrefabGroups();
-                    _gameObjectListView.itemsSource = _prefabGroups;
-                }
-                else
-                {
-                    BuildInstanceRows();
-                    _gameObjectListView.itemsSource = _instanceRows;
+                BuildInstanceRows();
+                _gameObjectListView.itemsSource = _instanceRows;
 
-                    if (selectedInstanceId != 0)
-                    {
-                        int restored = _instanceRows.FindIndex(r =>
-                            r.root != null && r.root.GetInstanceID() == selectedInstanceId);
-                        _selectedGoIndex = restored;
-                    }
+                if (selectedInstanceId != 0)
+                {
+                    int restored = _instanceRows.FindIndex(r =>
+                        r.root != null && r.root.GetInstanceID() == selectedInstanceId);
+                    _selectedGoIndex = restored;
                 }
             }
             else
@@ -1665,10 +1645,14 @@ namespace SashaRX.PrefabDoctor
                 return;
             }
 
-            if (IsGroupingByPrefabTypeActive()
-                && _selectedGoIndex >= 0 && _selectedGoIndex < _prefabGroups.Count)
+            if (IsGroupingByPrefabTypeActive())
             {
-                var group = _prefabGroups[_selectedGoIndex];
+                var group = _activeGroupForRightPanel;
+                if (group == null && _selectedGoIndex >= 0 && _selectedGoIndex < _instanceRows.Count)
+                {
+                    var (selectedInstance, _) = _instanceRows[_selectedGoIndex];
+                    group = GetPrefabGroupForInstance(selectedInstance);
+                }
                 string label = group != null && !string.IsNullOrEmpty(group.DisplayName)
                     ? group.DisplayName
                     : "(group)";
@@ -1809,11 +1793,15 @@ namespace SashaRX.PrefabDoctor
 
             if (_report != null && _selectedGoIndex >= 0)
             {
-                // Hierarchy mode (optional): selected item is one prefab type group.
+                // Hierarchy mode + Group Types:
+                // left panel stays instance-based; right panel switches to
+                // prefab-type instance tree for the selected instance's asset.
                 if (IsGroupingByPrefabTypeActive()
-                    && _selectedGoIndex < _prefabGroups.Count)
+                    && _report.IsHierarchyMode
+                    && _selectedGoIndex < _instanceRows.Count)
                 {
-                    var group = _prefabGroups[_selectedGoIndex];
+                    var (selectedInstance, _) = _instanceRows[_selectedGoIndex];
+                    var group = GetPrefabGroupForInstance(selectedInstance);
                     LoadInstancesForGroup(group);
 
                     SetDisplay(_conflictListView, false);
@@ -1921,6 +1909,43 @@ namespace SashaRX.PrefabDoctor
 
             _groupInstanceRows.Sort((a, b) =>
                 string.Compare(a.hierarchyPath, b.hierarchyPath, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private PrefabTypeGroup GetPrefabGroupForInstance(GameObject instanceRoot)
+        {
+            if (_report?.InstanceToAsset == null || _report.AssetToInstances == null
+                || instanceRoot == null)
+                return null;
+
+            if (!_report.InstanceToAsset.TryGetValue(instanceRoot, out var assetPath)
+                || string.IsNullOrEmpty(assetPath))
+                return null;
+
+            if (!_report.AssetToInstances.TryGetValue(assetPath, out var instances)
+                || instances == null)
+                return null;
+
+            var group = new PrefabTypeGroup
+            {
+                AssetPath = assetPath,
+                DisplayName = System.IO.Path.GetFileNameWithoutExtension(assetPath),
+                Instances = instances
+            };
+
+            int total = 0;
+            foreach (var goReport in _report.GameObjects)
+            {
+                GameObject root = goReport.InstanceRoot;
+                if (root == null && TryGetInstanceRootForGoReport(goReport, out var resolved))
+                    root = resolved;
+                if (root == null || !_report.InstanceToAsset.TryGetValue(root, out var p)
+                    || p != assetPath) continue;
+
+                foreach (var c in goReport.Conflicts)
+                    if (PassesFilter(c)) total++;
+            }
+            group.TotalConflicts = total;
+            return group;
         }
 
         /// <summary>
