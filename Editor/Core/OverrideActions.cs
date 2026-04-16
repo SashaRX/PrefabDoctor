@@ -352,6 +352,7 @@ namespace SashaRX.PrefabDoctor
 
         private static string GetSourcePropertyValue(Object sourceObj, string propertyPath)
         {
+            if (sourceObj == null) return null;
             // SerializedObject owns a native handle; Dispose (via using) ensures
             // it is released immediately instead of waiting for finalization.
             using var so = new SerializedObject(sourceObj);

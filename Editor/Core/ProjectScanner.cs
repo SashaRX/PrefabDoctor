@@ -98,13 +98,19 @@ namespace SashaRX.PrefabDoctor
             string[] guids = AssetDatabase.FindAssets("t:Prefab", searchFolders);
             report.TotalPrefabs = guids.Length;
 
-            // Build index (fast — no asset loading)
-            var fbxIndex = BuildFbxWrapperIndex(guids);
+            // Build FBX wrapper index with progress feedback (0 → 0.1)
+            var fbxIndex = new Dictionary<string, List<string>>();
+            for (int fi = 0; fi < guids.Length; fi++)
+            {
+                BuildFbxWrapperEntry(guids[fi], fbxIndex);
+                if (fi % batchSize == 0)
+                    yield return 0.1f * ((float)fi / guids.Length);
+            }
             report.FbxToWrappersIndex = fbxIndex;
 
             yield return 0.1f; // index built
 
-            // Analyze each prefab
+            // Analyze each prefab (0.1 → 1.0)
             for (int i = 0; i < guids.Length; i++)
             {
                 string path = AssetDatabase.GUIDToAssetPath(guids[i]);
@@ -132,50 +138,114 @@ namespace SashaRX.PrefabDoctor
             yield return 1f;
         }
 
+        // ── Subset scan (dependency health) ───────────────────────
+
+        /// <summary>
+        /// Scan a specific list of prefab asset paths (e.g. dependencies
+        /// discovered during hierarchy analysis). Yields progress [0..1].
+        /// </summary>
+        public IEnumerator<float> ScanAssetsIncremental(
+            IReadOnlyCollection<string> assetPaths,
+            ProjectScanReport report,
+            int batchSize = 20)
+        {
+            var sw = Stopwatch.StartNew();
+            report.ScanScope = $"{assetPaths.Count} dependent assets";
+            report.TotalPrefabs = assetPaths.Count;
+
+            // Convert paths to GUIDs for the FBX index builder.
+            var guids = new List<string>();
+            foreach (var path in assetPaths)
+            {
+                string guid = AssetDatabase.AssetPathToGUID(path);
+                if (!string.IsNullOrEmpty(guid))
+                    guids.Add(guid);
+            }
+
+            // Build FBX wrapper index with progress feedback (0 → 0.1)
+            var fbxIndex = new Dictionary<string, List<string>>();
+            for (int fi = 0; fi < guids.Count; fi++)
+            {
+                BuildFbxWrapperEntry(guids[fi], fbxIndex);
+                if (fi % batchSize == 0)
+                    yield return 0.1f * ((float)fi / guids.Count);
+            }
+            report.FbxToWrappersIndex = fbxIndex;
+
+            yield return 0.1f;
+
+            int i = 0;
+            foreach (var path in assetPaths)
+            {
+                var result = AnalyzePrefab(path, fbxIndex);
+                if (result != null)
+                {
+                    report.Results.Add(result);
+                    TallyCategory(report, result);
+                }
+
+                i++;
+                if (i % batchSize == 0)
+                    yield return 0.1f + 0.9f * ((float)i / assetPaths.Count);
+            }
+
+            report.Results.Sort((a, b) =>
+            {
+                int catA = CategorySeverity(a.PrimaryCategory);
+                int catB = CategorySeverity(b.PrimaryCategory);
+                if (catA != catB) return catB.CompareTo(catA);
+                return b.OverrideCount.CompareTo(a.OverrideCount);
+            });
+
+            report.IsComplete = true;
+            report.ScanTimeMs = sw.ElapsedMilliseconds;
+            yield return 1f;
+        }
+
         // ── FBX → Wrapper Index ────────────────────────────────────
 
         /// <summary>
         /// Build index: for each FBX/model asset, which prefab assets are
         /// Prefab Variants based on it (i.e. "wrappers").
+        /// Used by the non-incremental <see cref="Scan"/> path.
         /// </summary>
         private Dictionary<string, List<string>> BuildFbxWrapperIndex(string[] prefabGuids)
         {
             var index = new Dictionary<string, List<string>>();
-
             foreach (var guid in prefabGuids)
+                BuildFbxWrapperEntry(guid, index);
+            return index;
+        }
+
+        /// <summary>
+        /// Process a single prefab GUID and add any FBX wrapper entries to the index.
+        /// </summary>
+        private void BuildFbxWrapperEntry(string guid, Dictionary<string, List<string>> index)
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+
+            string[] deps = AssetDatabase.GetDependencies(path, false);
+            foreach (var dep in deps)
             {
-                string path = AssetDatabase.GUIDToAssetPath(guid);
+                if (!IsModelAsset(dep)) continue;
 
-                // Check what this prefab's base is
-                // Use dependencies: if prefab depends on a .fbx, it might be a wrapper
-                string[] deps = AssetDatabase.GetDependencies(path, false);
-                foreach (var dep in deps)
+                var prefab = AssetDatabase.LoadMainAssetAtPath(path) as GameObject;
+                if (prefab == null) continue;
+
+                var source = PrefabUtility.GetCorrespondingObjectFromSource(prefab);
+                if (source == null) continue;
+
+                string sourcePath = AssetDatabase.GetAssetPath(source);
+                if (sourcePath == dep)
                 {
-                    if (!IsModelAsset(dep)) continue;
-
-                    // This prefab depends on a model file — could be a wrapper
-                    // Verify: load and check if it's a direct Prefab Variant of the model
-                    var prefab = AssetDatabase.LoadMainAssetAtPath(path) as GameObject;
-                    if (prefab == null) continue;
-
-                    var source = PrefabUtility.GetCorrespondingObjectFromSource(prefab);
-                    if (source == null) continue;
-
-                    string sourcePath = AssetDatabase.GetAssetPath(source);
-                    if (sourcePath == dep)
+                    if (!index.TryGetValue(dep, out var list))
                     {
-                        // This is a direct wrapper/variant of the model
-                        if (!index.TryGetValue(dep, out var list))
-                        {
-                            list = new List<string>();
-                            index[dep] = list;
-                        }
-                        list.Add(path);
+                        list = new List<string>();
+                        index[dep] = list;
                     }
+                    list.Add(path);
                 }
             }
-
-            return index;
         }
 
         // ── Per-Prefab Analysis ────────────────────────────────────
@@ -311,6 +381,8 @@ namespace SashaRX.PrefabDoctor
 
         private void CheckBrokenReferences(GameObject prefab, PrefabScanResult result)
         {
+            // No HasPrefabInstanceAnyOverrides gate here — this method runs
+            // on prefab ASSETS (not scene instances), where that API doesn't apply.
             var mods = PrefabUtility.GetPropertyModifications(prefab);
             if (mods == null) return;
 
@@ -332,35 +404,39 @@ namespace SashaRX.PrefabDoctor
 
         private void CheckUnusedOverrides(GameObject prefab, PrefabScanResult result)
         {
-            // Unused overrides = overrides where property path no longer exists
-            // on the target object (field renamed, SerializeReference removed, etc.)
-            // For full detection we'd need SerializedObject per component —
-            // expensive. Use lightweight heuristic: null target = broken ref (above),
-            // but also check for common patterns.
+            // No HasPrefabInstanceAnyOverrides gate here — this method runs
+            // on prefab ASSETS (not scene instances), where that API doesn't apply.
             var mods = PrefabUtility.GetPropertyModifications(prefab);
             if (mods == null) return;
 
             int unused = 0;
-            foreach (var mod in mods)
+            var soCache = new Dictionary<UnityEngine.Object, SerializedObject>();
+            try
             {
-                if (mod.target == null) continue; // already counted as broken ref
-                if (PrefabUtility.IsDefaultOverride(mod)) continue;
-
-                // Try to verify property exists on target
-                try
+                foreach (var mod in mods)
                 {
-                    var so = new SerializedObject(mod.target);
-                    var prop = so.FindProperty(mod.propertyPath);
-                    if (prop == null)
+                    if (mod.target == null) continue;
+                    if (PrefabUtility.IsDefaultOverride(mod)) continue;
+
+                    try
+                    {
+                        if (!soCache.TryGetValue(mod.target, out var so))
+                        {
+                            so = new SerializedObject(mod.target);
+                            soCache[mod.target] = so;
+                        }
+                        if (so.FindProperty(mod.propertyPath) == null)
+                            unused++;
+                    }
+                    catch
                     {
                         unused++;
                     }
                 }
-                catch
-                {
-                    // SerializedObject creation can fail for destroyed objects
-                    unused++;
-                }
+            }
+            finally
+            {
+                foreach (var so in soCache.Values) so?.Dispose();
             }
 
             if (unused > 0)

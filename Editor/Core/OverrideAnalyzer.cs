@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 using Object = UnityEngine.Object;
@@ -72,8 +73,43 @@ namespace SashaRX.PrefabDoctor
         // merge them into the per-instance map with a cheap loop instead of
         // re-running GetPropertyModifications + ProcessMod for every
         // instance of the same prefab.
+        //
+        // PERSISTENT across runs — prefab asset overrides don't change unless
+        // the asset is modified. Invalidated by projectChanged event.
         private readonly Dictionary<int, List<(PropertyKey key, OverrideEntry entry)>>
             _processedModsCache = new();
+        private bool _processedModsCacheDirty = true;
+
+        /// <summary>
+        /// Register for Editor events to invalidate persistent caches.
+        /// Called from the window's OnEnable.
+        /// </summary>
+        public void RegisterCacheInvalidation()
+        {
+            EditorApplication.projectChanged -= OnProjectChanged;
+            EditorApplication.projectChanged += OnProjectChanged;
+            Undo.undoRedoPerformed -= OnUndoRedo;
+            Undo.undoRedoPerformed += OnUndoRedo;
+        }
+
+        public void UnregisterCacheInvalidation()
+        {
+            EditorApplication.projectChanged -= OnProjectChanged;
+            Undo.undoRedoPerformed -= OnUndoRedo;
+        }
+
+        private void OnProjectChanged()
+        {
+            // Prefab assets may have changed — invalidate depth 1+ cache.
+            _processedModsCacheDirty = true;
+        }
+
+        private void OnUndoRedo()
+        {
+            // Scene overrides may have changed — depth 0 is always re-fetched
+            // per run, but the _keyBaseCache might reference destroyed objects.
+            _keyBaseCache.Clear();
+        }
 
         // Key base cache: MakeKey does GetType().Name (reflection) and
         // GetRelativePath (walks the whole transform parent chain + string
@@ -84,8 +120,16 @@ namespace SashaRX.PrefabDoctor
         private readonly Dictionary<int, (string componentType, string goPath, int targetId)>
             _keyBaseCache = new();
 
+        /// <summary>
+        /// Monotonically increasing run ID — incremented in BeginRun().
+        /// Incremental jobs capture this at start; if AbortRun() causes a
+        /// new BeginRun(), the old job detects the mismatch and yields break.
+        /// </summary>
+        private int _runId;
+
         private void BeginRun()
         {
+            _runId++;
             var settings = PrefabDoctorSettings.GetOrCreateDefault();
             var extra = settings?.AdditionalIgnoredPrefixes ?? Array.Empty<string>();
 
@@ -123,8 +167,16 @@ namespace SashaRX.PrefabDoctor
             _runIgnoredTypes = null;
             _goPathCache.Clear();
             _componentCache.Clear();
-            _processedModsCache.Clear();
             _keyBaseCache.Clear();
+
+            // _processedModsCache is PERSISTENT across runs for hierarchy mode.
+            // Prefab asset overrides (depth 1+) don't change between analyses
+            // unless the project changes. Only clear when invalidated.
+            if (_processedModsCacheDirty)
+            {
+                _processedModsCache.Clear();
+                _processedModsCacheDirty = false;
+            }
         }
 
         // ── Chain Building ─────────────────────────────────────────
@@ -289,6 +341,13 @@ namespace SashaRX.PrefabDoctor
                 else
                 {
                     // Depth 0 (scene instance): always unique per instance.
+                    // Gate: skip the expensive GetPropertyModifications if
+                    // no non-default overrides exist on this instance.
+                    if (!IncludeDefaultOverrides
+                        && level.Root != null
+                        && !PrefabUtility.HasPrefabInstanceAnyOverrides(level.Root, false))
+                        continue;
+
                     var mods = PrefabUtility.GetPropertyModifications(level.Root);
                     if (mods == null) continue;
 
@@ -317,12 +376,17 @@ namespace SashaRX.PrefabDoctor
         private void ProcessModFast(PropertyModification mod, NestingLevel level,
             Dictionary<PropertyKey, List<OverrideEntry>> map)
         {
+            // Skip default overrides early — avoids processing m_Name,
+            // m_IsActive, m_Father etc. that Unity always emits.
+            if (!IncludeDefaultOverrides && PrefabUtility.IsDefaultOverride(mod))
+                return;
+
             if (mod.target == null)
             {
                 var orphanKey = new PropertyKey
                 {
                     ComponentType = "MISSING",
-                    GameObjectPath = "?",
+                    GameObjectPath = "(orphaned)",
                     PropertyPath = mod.propertyPath,
                     TargetInstanceId = 0
                 };
@@ -424,7 +488,7 @@ namespace SashaRX.PrefabDoctor
                 var orphanKey = new PropertyKey
                 {
                     ComponentType = "MISSING",
-                    GameObjectPath = "?",
+                    GameObjectPath = "(orphaned)",
                     PropertyPath = mod.propertyPath,
                     TargetInstanceId = 0
                 };
@@ -435,7 +499,19 @@ namespace SashaRX.PrefabDoctor
             if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
                 return;
 
-            if (IsIgnoredComponentType(mod.target.GetType().Name))
+            // Use the same _keyBaseCache as ProcessModFast to avoid
+            // GetType().Name (reflection) and GetRelativePath (transform walk)
+            // on every mod — all mods targeting the same component share
+            // the same key base.
+            int targetId = mod.target.GetInstanceID();
+            if (!_keyBaseCache.TryGetValue(targetId, out var keyBase))
+            {
+                string typeName = mod.target.GetType().Name;
+                keyBase = (typeName, GetRelativePath(mod.target), targetId);
+                _keyBaseCache[targetId] = keyBase;
+            }
+
+            if (IsIgnoredComponentType(keyBase.componentType))
                 return;
 
             if (subtreeRoot != null)
@@ -445,7 +521,13 @@ namespace SashaRX.PrefabDoctor
                     return;
             }
 
-            var key = MakeKey(mod);
+            var key = new PropertyKey
+            {
+                ComponentType = keyBase.componentType,
+                GameObjectPath = keyBase.goPath,
+                PropertyPath = mod.propertyPath,
+                TargetInstanceId = keyBase.targetId
+            };
             AddToMap(map, key, level, mod);
         }
 
@@ -478,6 +560,12 @@ namespace SashaRX.PrefabDoctor
             try
             {
                 report.Chain = BuildChain(root);
+
+                // Collect dependent asset paths for the health scan.
+                foreach (var level in report.Chain)
+                    if (!string.IsNullOrEmpty(level.AssetPath) && !level.IsSceneInstance)
+                        report.DependentAssetPaths.Add(level.AssetPath);
+
                 if (report.Chain.Count < 2)
                 {
                     report.IsComplete = true;
@@ -508,10 +596,16 @@ namespace SashaRX.PrefabDoctor
                         AddConflictToReport(goReports, conflict, report);
                 }
 
-                report.GameObjects = goReports.Values
-                    .OrderByDescending(g => g.PingPongCount)
-                    .ThenByDescending(g => g.MultiOverrideCount)
-                    .ToList();
+                var goList = new List<GameObjectReport>(goReports.Values);
+                goList.Sort(static (a, b) =>
+                {
+                    int c = b.PingPongCount.CompareTo(a.PingPongCount);
+                    if (c != 0) return c;
+                    c = b.MultiOverrideCount.CompareTo(a.MultiOverrideCount);
+                    if (c != 0) return c;
+                    return b.InsignificantCount.CompareTo(a.InsignificantCount);
+                });
+                report.GameObjects = goList;
 
                 report.IsComplete = true;
             }
@@ -565,16 +659,17 @@ namespace SashaRX.PrefabDoctor
             var sw = Stopwatch.StartNew();
             report.AnalyzedRoot = root;
             report.IsHierarchyMode = true;
+            report.AssetToInstances = new Dictionary<string, List<GameObject>>();
+            report.InstanceToAsset = new Dictionary<GameObject, string>();
 
             BeginRun();
+            int myRunId = _runId;
 
             // Find all PrefabInstance roots recursively.
             var instanceRoots = new List<(GameObject go, string hierarchyPath)>();
-            CollectPrefabInstanceRoots(root.transform, "", instanceRoots);
+            var pathBuilder = new System.Text.StringBuilder(256);
+            CollectPrefabInstanceRoots(root.transform, pathBuilder, instanceRoots);
 
-            // Also include the root itself if it's the outermost prefab
-            // instance — otherwise overrides living directly on Level (scene
-            // Position, Game Map script, etc.) would not appear in the report.
             if (PrefabUtility.IsPartOfPrefabInstance(root))
             {
                 var outerRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(root);
@@ -588,104 +683,86 @@ namespace SashaRX.PrefabDoctor
             var goReports = new Dictionary<string, GameObjectReport>();
             var goPathToRoot = new Dictionary<string, GameObject>();
             int total = instanceRoots.Count;
-
-            // Chain template cache: many scene instances share the same
-            // prefab asset (e.g. 200× Crate_01). BuildChain is O(depth)
-            // Unity API calls per invocation; caching the template
-            // (depth 1+, which is identical for all instances of the
-            // same prefab) reduces chain-build cost from O(instances ×
-            // depth) to O(unique_prefabs × depth + instances × 1).
             var chainTemplateCache = new Dictionary<string, List<NestingLevel>>();
+
+            // ── Phase 1: Collect raw data on main thread (Unity API) ──
+            // Batch: fetch chains + depth-0 mods for all instances.
+            // Pre-populate _processedModsCache for depth 1+ levels.
+            const int batchSize = 64;
+            var batch = new List<(
+                GameObject instanceRoot,
+                string hierPath,
+                List<NestingLevel> chain)>(batchSize);
 
             for (int idx = 0; idx < total; idx++)
             {
                 var (instanceGO, hierPath) = instanceRoots[idx];
-
-                // Build chain for this specific instance.
                 var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(instanceGO);
                 if (instanceRoot == null) instanceRoot = instanceGO;
 
-                // Record the concrete scene GameObject so the bulk Clean
-                // Orphans action can later call PrefabUtility.SetProperty-
-                // Modifications on it without re-walking the hierarchy.
                 report.HierarchyInstanceRoots.Add(instanceRoot);
 
                 var chain = BuildChainCached(instanceRoot, chainTemplateCache);
-                if (chain.Count >= 2)
+
+                // Map instance → the prefab asset it IS (not where it lives).
+                // Walk the chain to find the first level where Root is the
+                // root of its own asset (transform == transform.root).
+                // For nested instances (Plank_01 inside SovietBuilding),
+                // chain[1].Root is a child of SovietBuilding.prefab — skip.
+                // chain[2].Root is the root of Plank_01.prefab — use that.
+                string srcPath = null;
+                for (int c = 1; c < chain.Count; c++)
                 {
-                    float progress = (float)idx / total;
-
-                    // Collect ALL overrides for this instance in one pass
-                    // (no per-mod yielding). The pump in PumpHierarchyJob
-                    // uses a 200ms budget, so mid-instance yields just add
-                    // IEnumerator state-machine overhead without improving
-                    // Cancel responsiveness. We yield once at the instance
-                    // boundary instead.
-                    var overrideMap = new Dictionary<PropertyKey, List<OverrideEntry>>();
-                    CollectOverridesFast(chain, overrideMap);
-
-                    // Scalar properties — classify and merge with hier-prefixed paths.
-                    foreach (var kvp in overrideMap)
+                    var lvl = chain[c];
+                    if (lvl.Root != null && !lvl.IsSceneInstance
+                        && lvl.Root.transform == lvl.Root.transform.root)
                     {
-                        if (ComparerRouter.IsQuaternionComponent(kvp.Key.PropertyPath))
-                            continue;
-
-                        var prefixedKey = new PropertyKey
-                        {
-                            ComponentType = kvp.Key.ComponentType,
-                            GameObjectPath = hierPath.Length > 0
-                                ? $"{hierPath}/{kvp.Key.GameObjectPath}"
-                                : kvp.Key.GameObjectPath,
-                            PropertyPath = kvp.Key.PropertyPath,
-                            TargetInstanceId = kvp.Key.TargetInstanceId
-                        };
-
-                        var conflict = ClassifyConflict(prefixedKey, kvp.Value, chain);
-                        if (conflict != null)
-                        {
-                            AddConflictToReport(goReports, conflict, report);
-                            goPathToRoot.TryAdd(conflict.Key.GameObjectPath, instanceRoot);
-                        }
-                    }
-
-                    // Quaternion groups.
-                    var qGroups = GroupQuaternionOverrides(overrideMap);
-                    foreach (var qg in qGroups)
-                    {
-                        var prefixedKey = new PropertyKey
-                        {
-                            ComponentType = qg.BaseKey.ComponentType,
-                            GameObjectPath = hierPath.Length > 0
-                                ? $"{hierPath}/{qg.BaseKey.GameObjectPath}"
-                                : qg.BaseKey.GameObjectPath,
-                            PropertyPath = qg.BaseKey.PropertyPath,
-                            TargetInstanceId = qg.BaseKey.TargetInstanceId
-                        };
-
-                        var prefixedQg = new QuaternionGroup
-                        {
-                            BaseKey = prefixedKey,
-                            ValuesByDepth = qg.ValuesByDepth,
-                            AssetPathsByDepth = qg.AssetPathsByDepth
-                        };
-
-                        var conflict = ClassifyQuaternionGroup(prefixedQg);
-                        if (conflict != null)
-                        {
-                            AddConflictToReport(goReports, conflict, report);
-                            goPathToRoot.TryAdd(conflict.Key.GameObjectPath, instanceRoot);
-                        }
+                        srcPath = lvl.AssetPath;
+                        break;
                     }
                 }
+                if (!string.IsNullOrEmpty(srcPath))
+                {
+                    report.InstanceToAsset[instanceRoot] = srcPath;
+                    if (!report.AssetToInstances.TryGetValue(srcPath, out var instList))
+                    {
+                        instList = new List<GameObject>();
+                        report.AssetToInstances[srcPath] = instList;
+                    }
+                    instList.Add(instanceRoot);
+                }
 
-                // Yield once per instance — the pump's 200ms budget
-                // decides how many instances fit into one tick.
+                foreach (var level in chain)
+                    if (!string.IsNullOrEmpty(level.AssetPath) && !level.IsSceneInstance)
+                        report.DependentAssetPaths.Add(level.AssetPath);
+
+                if (chain.Count < 2) continue;
+
+                // Gate: skip instances with no non-default overrides.
+                // HasPrefabInstanceAnyOverrides is documented as the fastest
+                // way to check — avoids the expensive GetPropertyModifications.
+                if (!IncludeDefaultOverrides
+                    && !PrefabUtility.HasPrefabInstanceAnyOverrides(instanceRoot, false))
+                    continue;
+
+                batch.Add((instanceRoot, hierPath, chain));
+
+                // ── Phase 2: Process batch in parallel ──
+                if (batch.Count >= batchSize || idx == total - 1)
+                {
+                    ProcessBatchParallel(batch, goReports, goPathToRoot, report);
+                    batch.Clear();
+                }
+
+                if (_runId != myRunId) yield break;
                 yield return total > 0 ? (float)(idx + 1) / total : 1f;
             }
 
-            // In-place sort avoids the LINQ OrderByDescending chain which
-            // allocates intermediate arrays — on 8.8M GoReports that chain
-            // triggers multiple GC collections.
+            // Flush any remaining batch that wasn't processed inside the loop
+            // (can happen when last iterations hit `continue` before the flush site).
+            if (batch.Count > 0)
+                ProcessBatchParallel(batch, goReports, goPathToRoot, report);
+
             var goList = new List<GameObjectReport>(goReports.Values);
             goList.Sort(static (a, b) =>
             {
@@ -705,6 +782,110 @@ namespace SashaRX.PrefabDoctor
         }
 
         /// <summary>
+        /// Process a batch of instances: collect overrides on main thread
+        /// (Unity API), then classify conflicts in parallel (pure computation),
+        /// then merge results on main thread.
+        /// </summary>
+        private void ProcessBatchParallel(
+            List<(GameObject instanceRoot, string hierPath,
+                List<NestingLevel> chain)> batch,
+            Dictionary<string, GameObjectReport> goReports,
+            Dictionary<string, GameObject> goPathToRoot,
+            AnalysisReport report)
+        {
+            // ── Main thread: build overrideMaps (Unity API calls) ──
+            var prepared = new (
+                Dictionary<PropertyKey, List<OverrideEntry>> overrideMap,
+                string hierPath,
+                List<NestingLevel> chain,
+                GameObject instanceRoot
+            )[batch.Count];
+
+            for (int i = 0; i < batch.Count; i++)
+            {
+                var (instanceRoot, hierPath, chain) = batch[i];
+                var overrideMap = new Dictionary<PropertyKey, List<OverrideEntry>>();
+                CollectOverridesFast(chain, overrideMap);
+                prepared[i] = (overrideMap, hierPath, chain, instanceRoot);
+            }
+
+            // ── Parallel: classify conflicts (no Unity API) ──
+            var results = new (
+                List<PropertyConflict> conflicts,
+                GameObject instanceRoot
+            )[batch.Count];
+
+            Parallel.For(0, batch.Count, i =>
+            {
+                var (overrideMap, hierPath, chain, instanceRoot) = prepared[i];
+                var instanceConflicts = new List<PropertyConflict>();
+
+                // Scalar properties.
+                foreach (var kvp in overrideMap)
+                {
+                    if (ComparerRouter.IsQuaternionComponent(kvp.Key.PropertyPath))
+                        continue;
+
+                    var prefixedKey = new PropertyKey
+                    {
+                        ComponentType = kvp.Key.ComponentType,
+                        GameObjectPath = hierPath.Length > 0
+                            ? $"{hierPath}/{kvp.Key.GameObjectPath}"
+                            : kvp.Key.GameObjectPath,
+                        PropertyPath = kvp.Key.PropertyPath,
+                        TargetInstanceId = kvp.Key.TargetInstanceId
+                    };
+
+                    var conflict = ClassifyConflict(prefixedKey, kvp.Value, chain);
+                    if (conflict != null)
+                        instanceConflicts.Add(conflict);
+                }
+
+                // Quaternion groups.
+                var qGroups = GroupQuaternionOverrides(overrideMap);
+                foreach (var qg in qGroups)
+                {
+                    var prefixedKey = new PropertyKey
+                    {
+                        ComponentType = qg.BaseKey.ComponentType,
+                        GameObjectPath = hierPath.Length > 0
+                            ? $"{hierPath}/{qg.BaseKey.GameObjectPath}"
+                            : qg.BaseKey.GameObjectPath,
+                        PropertyPath = qg.BaseKey.PropertyPath,
+                        TargetInstanceId = qg.BaseKey.TargetInstanceId
+                    };
+
+                    var prefixedQg = new QuaternionGroup
+                    {
+                        BaseKey = prefixedKey,
+                        ValuesByDepth = qg.ValuesByDepth,
+                        AssetPathsByDepth = qg.AssetPathsByDepth
+                    };
+
+                    var conflict = ClassifyQuaternionGroup(prefixedQg);
+                    if (conflict != null)
+                        instanceConflicts.Add(conflict);
+                }
+
+                results[i] = (instanceConflicts, instanceRoot);
+            });
+
+            // ── Main thread: merge results into report ──
+            for (int i = 0; i < results.Length; i++)
+            {
+                var (conflicts, instanceRoot) = results[i];
+                if (conflicts.Count == 0) continue;
+
+                foreach (var conflict in conflicts)
+                {
+                    AddConflictToReport(goReports, conflict, report, instanceRoot);
+                    var instanceScopedKey = MakeInstanceScopedPathKey(instanceRoot, conflict.Key.GameObjectPath);
+                    goPathToRoot.TryAdd(instanceScopedKey, instanceRoot);
+                }
+            }
+        }
+
+        /// <summary>
         /// Release per-run state (SerializedObject cache, ignore snapshot,
         /// GO/component caches) without completing an analysis. Call this
         /// from the pump loop if the user cancels an incremental run.
@@ -717,23 +898,24 @@ namespace SashaRX.PrefabDoctor
         /// <summary>
         /// Recursively find all GameObjects that are PrefabInstance roots.
         /// </summary>
-        private void CollectPrefabInstanceRoots(Transform parent, string parentPath,
+        private void CollectPrefabInstanceRoots(Transform parent,
+            System.Text.StringBuilder pathBuilder,
             List<(GameObject go, string hierarchyPath)> results)
         {
             for (int i = 0; i < parent.childCount; i++)
             {
                 var child = parent.GetChild(i);
-                string childPath = parentPath.Length > 0
-                    ? $"{parentPath}/{child.name}"
-                    : child.name;
+                int prevLen = pathBuilder.Length;
+                if (prevLen > 0) pathBuilder.Append('/');
+                pathBuilder.Append(child.name);
 
                 if (PrefabUtility.IsAnyPrefabInstanceRoot(child.gameObject))
                 {
-                    results.Add((child.gameObject, childPath));
+                    results.Add((child.gameObject, pathBuilder.ToString()));
                 }
 
-                // Continue recursing into children — nested instances inside nested instances
-                CollectPrefabInstanceRoots(child, childPath, results);
+                CollectPrefabInstanceRoots(child, pathBuilder, results);
+                pathBuilder.Length = prevLen; // restore
             }
         }
 
@@ -747,8 +929,14 @@ namespace SashaRX.PrefabDoctor
         {
             var sw = Stopwatch.StartNew();
             BeginRun();
+            int myRunId = _runId;
             report.AnalyzedRoot = root;
             report.Chain = BuildChain(root);
+
+            // Collect dependent asset paths for the health scan.
+            foreach (var level in report.Chain)
+                if (!string.IsNullOrEmpty(level.AssetPath) && !level.IsSceneInstance)
+                    report.DependentAssetPaths.Add(level.AssetPath);
 
             if (report.Chain.Count < 2)
             {
@@ -778,7 +966,10 @@ namespace SashaRX.PrefabDoctor
 
                 processed++;
                 if (processed % batchSize == 0)
+                {
+                    if (_runId != myRunId) yield break;
                     yield return (float)processed / totalKeys;
+                }
             }
 
             foreach (var qg in quaternionGroups)
@@ -890,8 +1081,11 @@ namespace SashaRX.PrefabDoctor
         {
             const float dotThreshold = 0.99999f; // ~0.01°
 
-            var depths = qg.ValuesByDepth.Keys.OrderBy(d => d).ToList();
-            if (depths.Count < 2) return null;
+            if (qg.ValuesByDepth.Count < 2) return null;
+
+            // Sort depths without LINQ — typically 2-5 items.
+            var depths = new List<int>(qg.ValuesByDepth.Keys);
+            depths.Sort();
 
             // All same rotation?
             bool allSame = true;
@@ -902,12 +1096,17 @@ namespace SashaRX.PrefabDoctor
                 { allSame = false; break; }
             }
 
-            var entries = depths.Select(d => new OverrideEntry
+            var entries = new List<OverrideEntry>(depths.Count);
+            for (int i = 0; i < depths.Count; i++)
             {
-                Depth = d,
-                Value = FmtQ(qg.ValuesByDepth[d]),
-                AssetPath = qg.AssetPathsByDepth.GetValueOrDefault(d, "")
-            }).ToList();
+                int d = depths[i];
+                entries.Add(new OverrideEntry
+                {
+                    Depth = d,
+                    Value = FmtQ(qg.ValuesByDepth[d]),
+                    AssetPath = qg.AssetPathsByDepth.GetValueOrDefault(d, "")
+                });
+            }
 
             if (allSame)
                 return new PropertyConflict
@@ -1167,6 +1366,9 @@ namespace SashaRX.PrefabDoctor
         /// </summary>
         private string ReadPropertyValue(Object obj, string propertyPath)
         {
+            // Unity overloads == for destroyed objects; guard against stale refs.
+            if (obj == null) return null;
+
             if (!_soCache.TryGetValue(obj, out var so))
             {
                 so = new SerializedObject(obj);
@@ -1234,13 +1436,23 @@ namespace SashaRX.PrefabDoctor
 
         private static void AddConflictToReport(
             Dictionary<string, GameObjectReport> goReports,
-            PropertyConflict conflict, AnalysisReport report)
+            PropertyConflict conflict, AnalysisReport report,
+            GameObject instanceRoot = null)
         {
             string goPath = conflict.Key.GameObjectPath;
-            if (!goReports.TryGetValue(goPath, out var goReport))
+            // In hierarchy mode, multiple instances can have the same
+            // GameObjectPath (duplicate sibling names). Scope the key by
+            // instanceRoot InstanceID so each row binds to its own owner.
+            string key = MakeInstanceScopedPathKey(instanceRoot, goPath);
+            if (!goReports.TryGetValue(key, out var goReport))
             {
-                goReport = new GameObjectReport { RelativePath = goPath };
-                goReports[goPath] = goReport;
+                goReport = new GameObjectReport
+                {
+                    RelativePath = goPath,
+                    InstanceScopedPathKey = key,
+                    InstanceRoot = instanceRoot
+                };
+                goReports[key] = goReport;
             }
 
             goReport.Conflicts.Add(conflict);
@@ -1264,6 +1476,12 @@ namespace SashaRX.PrefabDoctor
                     report.TotalOrphan++;
                     break;
             }
+        }
+
+        private static string MakeInstanceScopedPathKey(GameObject instanceRoot, string goPath)
+        {
+            if (instanceRoot == null) return goPath;
+            return $"{instanceRoot.GetInstanceID()}:{goPath}";
         }
 
         // ── Generic helpers ────────────────────────────────────────

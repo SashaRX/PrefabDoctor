@@ -114,7 +114,13 @@ namespace SashaRX.PrefabDoctor
     internal class GameObjectReport
     {
         public string RelativePath;
+        /// <summary>
+        /// Stable key for hierarchy mode: "instanceRootInstanceId:RelativePath".
+        /// In non-hierarchy mode equals <see cref="RelativePath"/>.
+        /// </summary>
+        public string InstanceScopedPathKey;
         public GameObject Instance; // may be null if analyzing asset
+        public GameObject InstanceRoot; // hierarchy mode: scene PrefabInstance root
         public List<PropertyConflict> Conflicts = new();
 
         public int PingPongCount;
@@ -155,7 +161,7 @@ namespace SashaRX.PrefabDoctor
         public List<GameObject> HierarchyInstanceRoots = new();
 
         /// <summary>
-        /// Mapping from <see cref="GameObjectReport.RelativePath"/> to the
+        /// Mapping from <see cref="GameObjectReport.InstanceScopedPathKey"/> to the
         /// PrefabInstance root that owns it. Populated only in hierarchy
         /// mode. Used by <c>ResolveBatchTasks</c> to dispatch each
         /// conflict to the correct nested instance root for
@@ -163,5 +169,42 @@ namespace SashaRX.PrefabDoctor
         /// expensive and fragile <c>ResolveByRelativePath</c> path walk.
         /// </summary>
         public Dictionary<string, GameObject> GoPathToInstanceRoot;
+
+        /// <summary>
+        /// Unique prefab asset paths discovered during analysis (from chain
+        /// NestingLevels). Populated in both instance and hierarchy modes.
+        /// Used to scope the dependency health scan to relevant assets only.
+        /// </summary>
+        public HashSet<string> DependentAssetPaths = new();
+
+        /// <summary>
+        /// Maps source prefab asset path → list of scene instance roots.
+        /// Populated in hierarchy mode. Used by the UI to group the left
+        /// panel by prefab type instead of individual child GameObjects.
+        /// </summary>
+        public Dictionary<string, List<GameObject>> AssetToInstances;
+
+        /// <summary>
+        /// Maps scene instance root → source prefab asset path.
+        /// Populated in hierarchy mode.
+        /// </summary>
+        public Dictionary<GameObject, string> InstanceToAsset;
+    }
+
+    /// <summary>
+    /// Groups all analysis data for one prefab asset type across all scene
+    /// instances. Built from AnalysisReport for the UI layer.
+    /// </summary>
+    internal class PrefabTypeGroup
+    {
+        public string AssetPath;
+        public string DisplayName;
+        public List<GameObject> Instances = new();
+        public List<GameObjectReport> ChildReports = new();
+        public int TotalConflicts;
+        public int PingPongCount;
+        public int MultiOverrideCount;
+        public int OrphanCount;
+        public int InsignificantCount;
     }
 }
