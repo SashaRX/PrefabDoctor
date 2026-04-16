@@ -1310,7 +1310,7 @@ namespace SashaRX.PrefabDoctor
             // can see WHICH scene instance this override belongs to.
             if (_report != null && _report.IsHierarchyMode
                 && _report.GoPathToInstanceRoot != null
-                && _report.GoPathToInstanceRoot.TryGetValue(goPath, out var instRoot)
+                && TryGetInstanceRootForGoReport(row.GoReport, out var instRoot)
                 && instRoot != null)
             {
                 lbl.text = instRoot.name;
@@ -1424,9 +1424,9 @@ namespace SashaRX.PrefabDoctor
         /// Resolve a conflict's GameObjectPath to a scene object and ping it.
         /// Walks the path from the analyzed root or uses GoPathToInstanceRoot.
         /// </summary>
-        private void PingConflictObject(PropertyConflict conflict)
+        private void PingConflictObject(ConflictRow row)
         {
-            PingSceneObject(conflict.Key.GameObjectPath);
+            PingSceneObject(row.GoReport);
         }
 
         private void PingSceneObject(string relativePath)
@@ -1449,6 +1449,40 @@ namespace SashaRX.PrefabDoctor
                 EditorGUIUtility.PingObject(sceneGO);
                 Selection.activeGameObject = sceneGO;
             }
+        }
+
+        private void PingSceneObject(GameObjectReport goReport)
+        {
+            if (goReport == null) return;
+
+            var sceneGO = ResolveByRelativePath(goReport.RelativePath);
+            if (sceneGO == null
+                && _report?.GoPathToInstanceRoot != null
+                && TryGetInstanceRootForGoReport(goReport, out var instanceRoot)
+                && instanceRoot != null)
+            {
+                sceneGO = instanceRoot;
+            }
+
+            if (sceneGO != null)
+            {
+                EditorGUIUtility.PingObject(sceneGO);
+                Selection.activeGameObject = sceneGO;
+            }
+        }
+
+        private bool TryGetInstanceRootForGoReport(
+            GameObjectReport goReport, out GameObject instanceRoot)
+        {
+            instanceRoot = null;
+            if (goReport == null || _report?.GoPathToInstanceRoot == null) return false;
+
+            var key = goReport.InstanceScopedPathKey;
+            if (string.IsNullOrEmpty(key))
+                key = goReport.RelativePath;
+
+            return _report.GoPathToInstanceRoot.TryGetValue(key, out instanceRoot)
+                && instanceRoot != null;
         }
 
         private void RefreshConflictHeader()
@@ -1659,7 +1693,7 @@ namespace SashaRX.PrefabDoctor
 
             // Ping the scene object for the last selected conflict row
             if (_autoPing && lastSelectedRow >= 0 && lastSelectedRow < _conflictRows.Count)
-                PingConflictObject(_conflictRows[lastSelectedRow].Conflict);
+                PingConflictObject(_conflictRows[lastSelectedRow]);
 
             UpdateBatchBar();
         }
@@ -1866,15 +1900,6 @@ namespace SashaRX.PrefabDoctor
         {
             if (_report == null) yield break;
 
-            // Hierarchy mode: use the GoPathToInstanceRoot mapping built
-            // during analysis instead of walking the scene hierarchy per
-            // conflict. This is both faster (O(1) lookup vs O(depth) walk)
-            // and correct (the old ResolveByRelativePath failed on
-            // hier-prefixed paths that don't start with the root's name).
-            var pathMap = _report.IsHierarchyMode
-                ? _report.GoPathToInstanceRoot
-                : null;
-
             foreach (var handle in handles)
             {
                 if (handle.GoReportIndex < 0
@@ -1886,10 +1911,9 @@ namespace SashaRX.PrefabDoctor
                 var conflict = go.Conflicts[handle.ConflictIndex];
 
                 GameObject instanceRoot;
-                if (pathMap != null)
+                if (_report.IsHierarchyMode)
                 {
-                    if (!pathMap.TryGetValue(go.RelativePath, out instanceRoot)
-                        || instanceRoot == null) continue;
+                    if (!TryGetInstanceRootForGoReport(go, out instanceRoot)) continue;
                 }
                 else
                 {
@@ -1913,7 +1937,7 @@ namespace SashaRX.PrefabDoctor
 
             evt.menu.AppendAction("Ping in Scene", _ =>
             {
-                PingConflictObject(conflict);
+                PingConflictObject(row);
             });
 
             evt.menu.AppendSeparator();

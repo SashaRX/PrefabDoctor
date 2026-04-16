@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.1] - 2026-04-15
+
+### Fixed
+- Hierarchy analysis UI/object resolution now uses an instance-scoped GameObject key (`instanceRootInstanceId:relativePath`) to avoid collisions when multiple prefab instances share identical relative paths.
+- Batch actions and ping now resolve conflicts through the same instance-scoped key, preventing rows from being bound to the first matching instance.
+
 ## [0.2.0] - 2026-04-10
 
 ### Added — Project Scanner
