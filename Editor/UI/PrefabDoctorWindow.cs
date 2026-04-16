@@ -53,6 +53,7 @@ namespace SashaRX.PrefabDoctor
         // Prefab type groups — built after hierarchy analysis for the
         // left panel to show one entry per prefab asset (not per child GO).
         private List<PrefabTypeGroup> _prefabGroups;
+        private bool _groupByPrefabType;
 
 
 
@@ -93,6 +94,7 @@ namespace SashaRX.PrefabDoctor
         private ToolbarToggle _defaultsToggle;
         private ToolbarToggle _sceneToggle;
         private ToolbarToggle _internalToggle;
+        private ToolbarToggle _groupByTypeToggle;
         private ToolbarButton _cleanOrphansButton;
         private ToolbarButton _cleanInsignificantButton;
         private ToolbarButton _copyReportButton;
@@ -473,6 +475,20 @@ namespace SashaRX.PrefabDoctor
             _internalToggle.RegisterValueChangedCallback(evt => _showInternalProps = evt.newValue);
             toolbar.Add(_internalToggle);
 
+            _groupByTypeToggle = new ToolbarToggle
+            { text = "Group Types", value = _groupByPrefabType };
+            _groupByTypeToggle.tooltip = "Hierarchy mode: group left panel by prefab type "
+                + "instead of individual scene instances.";
+            _groupByTypeToggle.RegisterValueChangedCallback(evt =>
+            {
+                _groupByPrefabType = evt.newValue;
+                _selectedGoIndex = -1;
+                _selectedConflicts.Clear();
+                RefreshLeftPanel();
+                RebuildConflictList();
+            });
+            toolbar.Add(_groupByTypeToggle);
+
             var pingToggle = new ToolbarToggle { text = "Ping", value = _autoPing };
             pingToggle.tooltip = "Auto-ping scene object on left-panel click. "
                 + "Disable in hierarchy mode if ping causes lag on large scenes.";
@@ -767,14 +783,26 @@ namespace SashaRX.PrefabDoctor
             var nameLabel = row.Q<Label>("name");
             var countsLabel = row.Q<Label>("counts");
 
+            // Hierarchy mode + optional grouping: left panel shows prefab types.
+            if (IsGroupingByPrefabTypeActive())
+            {
+                if (index < 0 || index >= _prefabGroups.Count) return;
+                var group = _prefabGroups[index];
+                dot.style.backgroundColor = new Color(0.5f, 0.8f, 1f);
+                nameLabel.text = !string.IsNullOrEmpty(group.DisplayName) ? group.DisplayName : "(group)";
+                nameLabel.tooltip = group.AssetPath;
+                countsLabel.text = $"{group.TotalConflicts} ovr · {group.Instances.Count} inst";
+                return;
+            }
+
             // Hierarchy mode: left panel shows concrete scene instances.
-            if (_report != null && _report.IsHierarchyMode && _prefabGroups != null)
+            if (_report != null && _report.IsHierarchyMode)
             {
                 if (index < 0 || index >= _instanceRows.Count) return;
                 var (instanceRoot, overrideCount) = _instanceRows[index];
                 dot.style.backgroundColor = new Color(0.5f, 0.8f, 1f);
                 nameLabel.text = instanceRoot != null ? instanceRoot.name : "(null)";
-                nameLabel.tooltip = instanceRoot != null ? instanceRoot.name : "";
+                nameLabel.tooltip = GetHierarchyPath(instanceRoot);
                 countsLabel.text = $"{overrideCount} ovr";
                 return;
             }
@@ -821,9 +849,8 @@ namespace SashaRX.PrefabDoctor
 
             if (!_autoPing || idx < 0) return;
 
-            // Hierarchy mode: selecting an instance row — no ping
-            if (_report != null && _report.IsHierarchyMode
-                && _prefabGroups != null && idx < _instanceRows.Count)
+            // Hierarchy mode: do not auto-ping from left panel.
+            if (_report != null && _report.IsHierarchyMode)
                 return;
 
             // Instance mode: ping the scene object
@@ -843,6 +870,7 @@ namespace SashaRX.PrefabDoctor
             // by instance identity (InstanceID), not by list index.
             int selectedInstanceId = 0;
             if (_report != null && _report.IsHierarchyMode
+                && !IsGroupingByPrefabTypeActive()
                 && _selectedGoIndex >= 0 && _selectedGoIndex < _instanceRows.Count)
             {
                 var selectedRoot = _instanceRows[_selectedGoIndex].root;
@@ -854,15 +882,22 @@ namespace SashaRX.PrefabDoctor
             // Each row = one scene PrefabInstance root.
             if (_report != null && _report.IsHierarchyMode)
             {
-                BuildPrefabGroups();
-                BuildInstanceRows();
-                _gameObjectListView.itemsSource = _instanceRows;
-
-                if (selectedInstanceId != 0)
+                if (IsGroupingByPrefabTypeActive())
                 {
-                    int restored = _instanceRows.FindIndex(r =>
-                        r.root != null && r.root.GetInstanceID() == selectedInstanceId);
-                    _selectedGoIndex = restored;
+                    BuildPrefabGroups();
+                    _gameObjectListView.itemsSource = _prefabGroups;
+                }
+                else
+                {
+                    BuildInstanceRows();
+                    _gameObjectListView.itemsSource = _instanceRows;
+
+                    if (selectedInstanceId != 0)
+                    {
+                        int restored = _instanceRows.FindIndex(r =>
+                            r.root != null && r.root.GetInstanceID() == selectedInstanceId);
+                        _selectedGoIndex = restored;
+                    }
                 }
             }
             else
@@ -1009,6 +1044,22 @@ namespace SashaRX.PrefabDoctor
             return TryGetInstanceIdFromScopedKey(
                 goReport.InstanceScopedPathKey, out var reportInstanceId)
                 && reportInstanceId == selectedInstanceId;
+        }
+
+        private bool IsGroupingByPrefabTypeActive() =>
+            _report != null && _report.IsHierarchyMode && _groupByPrefabType;
+
+        private static string GetHierarchyPath(GameObject go)
+        {
+            if (go == null) return string.Empty;
+            var names = new Stack<string>();
+            var t = go.transform;
+            while (t != null)
+            {
+                names.Push(t.name);
+                t = t.parent;
+            }
+            return string.Join("/", names);
         }
 
         // ── Empty state (UI Toolkit) ───────────────────────────────
@@ -1465,8 +1516,11 @@ namespace SashaRX.PrefabDoctor
         {
             if (_report == null || _selectedGoIndex < 0) return;
 
+            if (IsGroupingByPrefabTypeActive())
+                return;
+
             // Hierarchy mode: ping selected scene instance root
-            if (_report.IsHierarchyMode && _prefabGroups != null
+            if (_report.IsHierarchyMode && !IsGroupingByPrefabTypeActive()
                 && _selectedGoIndex < _instanceRows.Count)
             {
                 var (instanceRoot, _) = _instanceRows[_selectedGoIndex];
@@ -1587,8 +1641,22 @@ namespace SashaRX.PrefabDoctor
                 return;
             }
 
+            if (IsGroupingByPrefabTypeActive()
+                && _selectedGoIndex >= 0 && _selectedGoIndex < _prefabGroups.Count)
+            {
+                var group = _prefabGroups[_selectedGoIndex];
+                string label = group != null && !string.IsNullOrEmpty(group.DisplayName)
+                    ? group.DisplayName
+                    : "(group)";
+                _conflictHeaderLabel.text = $"{label} — {_conflictRows.Count} overrides";
+                _conflictHeaderLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+                _conflictHeaderLabel.style.color = new Color(0.9f, 0.9f, 0.9f);
+                _conflictHeaderPingButton.style.display = DisplayStyle.None;
+                return;
+            }
+
             // Hierarchy mode: show selected instance + conflict count
-            if (_report.IsHierarchyMode && _prefabGroups != null
+            if (_report.IsHierarchyMode && !IsGroupingByPrefabTypeActive()
                 && _selectedGoIndex >= 0 && _selectedGoIndex < _instanceRows.Count)
             {
                 var (instanceRoot, _) = _instanceRows[_selectedGoIndex];
@@ -1707,8 +1775,27 @@ namespace SashaRX.PrefabDoctor
 
             if (_report != null && _selectedGoIndex >= 0)
             {
+                // Hierarchy mode (optional): selected item is one prefab type group.
+                if (IsGroupingByPrefabTypeActive()
+                    && _selectedGoIndex < _prefabGroups.Count)
+                {
+                    var group = _prefabGroups[_selectedGoIndex];
+                    if (group != null)
+                        LoadConflictsForGroup(group);
+
+                    SetDisplay(_conflictListView, true);
+                    SetDisplay(_instanceListView, false);
+                    SetDisplay(_backButton, false);
+                    _conflictListView.itemsSource = _conflictRows;
+                    _conflictListView.Rebuild();
+                    PushSelectionToListView();
+                    UpdateBatchBar();
+                    RefreshConflictHeader();
+                    return;
+                }
+
                 // Hierarchy mode: selected item is one scene instance.
-                if (_report.IsHierarchyMode && _prefabGroups != null
+                if (_report.IsHierarchyMode
                     && _selectedGoIndex < _instanceRows.Count)
                 {
                     var (instanceRoot, _) = _instanceRows[_selectedGoIndex];
