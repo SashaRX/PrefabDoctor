@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.5] - 2026-04-16
+
+### Fixed
+- Restored row-level ping in hierarchy conflict table: row ping now resolves via the selected scene instance root first and then child-relative path, preventing accidental pinging outside scene context.
+
 ## [0.2.4] - 2026-04-16
 
 ### Fixed

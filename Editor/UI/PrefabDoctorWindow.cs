@@ -1518,21 +1518,47 @@ namespace SashaRX.PrefabDoctor
         private void PingSceneObject(GameObjectReport goReport)
         {
             if (goReport == null) return;
-
-            var sceneGO = ResolveByRelativePath(goReport.RelativePath);
-            if (sceneGO == null
-                && _report?.GoPathToInstanceRoot != null
-                && TryGetInstanceRootForGoReport(goReport, out var instanceRoot)
-                && instanceRoot != null)
-            {
-                sceneGO = instanceRoot;
-            }
+            var sceneGO = ResolveSceneObjectForGoReport(goReport);
 
             if (sceneGO != null)
             {
                 EditorGUIUtility.PingObject(sceneGO);
                 Selection.activeGameObject = sceneGO;
             }
+        }
+
+        private GameObject ResolveSceneObjectForGoReport(GameObjectReport goReport)
+        {
+            if (goReport == null) return null;
+
+            if (TryGetInstanceRootForGoReport(goReport, out var instanceRoot)
+                && instanceRoot != null)
+            {
+                var path = goReport.RelativePath;
+                if (!string.IsNullOrEmpty(path))
+                {
+                    if (path == instanceRoot.name)
+                        return instanceRoot;
+
+                    var prefix = instanceRoot.name + "/";
+                    if (path.StartsWith(prefix, StringComparison.Ordinal))
+                    {
+                        var rest = path[prefix.Length..];
+                        if (!string.IsNullOrEmpty(rest))
+                        {
+                            var child = instanceRoot.transform.Find(rest);
+                            if (child != null) return child.gameObject;
+                        }
+                    }
+                }
+
+                // Even if child path lookup fails, keep the ping scoped to
+                // the resolved scene instance root (not any asset object).
+                return instanceRoot;
+            }
+
+            // Fallback for non-hierarchy / partial reports.
+            return ResolveByRelativePath(goReport.RelativePath);
         }
 
         private bool TryGetInstanceRootForGoReport(
