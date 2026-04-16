@@ -1168,8 +1168,14 @@ namespace SashaRX.PrefabDoctor
             compCol.bindCell = BindCompCell;
             columns.Add(compCol);
 
-            var pathCol = new Column { name = "path", title = "Instance", stretchable = false };
-            pathCol.width = 160f;
+            var instanceCol = new Column { name = "instance", title = "Instance", stretchable = false };
+            instanceCol.width = 160f;
+            instanceCol.makeCell = MakeLabelCell;
+            instanceCol.bindCell = BindInstanceCell;
+            columns.Add(instanceCol);
+
+            var pathCol = new Column { name = "path", title = "Object Path", stretchable = false };
+            pathCol.width = 220f;
             pathCol.makeCell = MakeLabelCell;
             pathCol.bindCell = BindPathCell;
             columns.Add(pathCol);
@@ -1390,6 +1396,35 @@ namespace SashaRX.PrefabDoctor
             lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
         }
 
+        private void BindInstanceCell(VisualElement element, int index)
+        {
+            var lbl = (Label)element;
+            if (index < 0 || index >= _conflictRows.Count) { lbl.text = ""; return; }
+            var row = _conflictRows[index];
+            lbl.userData = index;
+
+            if (TryGetInstanceRootForRow(row, out var instanceRoot) && instanceRoot != null)
+            {
+                lbl.text = instanceRoot.name;
+                lbl.tooltip = GetHierarchyPath(instanceRoot);
+                lbl.style.color = new Color(0.6f, 0.85f, 1f);
+            }
+            else if (row.GoReport.Instance != null)
+            {
+                lbl.text = row.GoReport.Instance.name;
+                lbl.tooltip = row.GoReport.Instance.name;
+                lbl.style.color = new Color(0.6f, 0.85f, 1f);
+            }
+            else
+            {
+                lbl.text = "-";
+                lbl.tooltip = "Instance not resolved";
+                lbl.style.color = new Color(0.6f, 0.6f, 0.6f);
+            }
+
+            lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
+        }
+
         private void BindPathCell(VisualElement element, int index)
         {
             var lbl = (Label)element;
@@ -1398,27 +1433,37 @@ namespace SashaRX.PrefabDoctor
             lbl.userData = index;
 
             string goPath = row.GoReport.RelativePath;
-
-            // In hierarchy mode, show the instance root name so the user
-            // can see WHICH scene instance this override belongs to.
-            if (_report != null && _report.IsHierarchyMode
-                && _report.GoPathToInstanceRoot != null
-                && TryGetInstanceRootForGoReport(row.GoReport, out var instRoot)
-                && instRoot != null)
-            {
-                lbl.text = instRoot.name;
-                lbl.tooltip = goPath;
-                lbl.style.color = new Color(0.6f, 0.85f, 1f);
-            }
-            else
-            {
-                // Instance mode: show child object name
-                int slash = goPath.LastIndexOf('/');
-                lbl.text = slash >= 0 ? goPath[(slash + 1)..] : goPath;
-                lbl.tooltip = goPath;
-                lbl.style.color = new Color(0.7f, 0.8f, 0.9f);
-            }
+            lbl.text = FormatObjectPathLabel(goPath);
+            lbl.tooltip = goPath;
+            lbl.style.color = new Color(0.7f, 0.8f, 0.9f);
             lbl.style.unityFontStyleAndWeight = FontStyle.Normal;
+        }
+
+        private bool TryGetInstanceRootForRow(ConflictRow row, out GameObject instanceRoot)
+        {
+            if (row.GoReport.InstanceRoot != null)
+            {
+                instanceRoot = row.GoReport.InstanceRoot;
+                return true;
+            }
+
+            return TryGetInstanceRootForGoReport(row.GoReport, out instanceRoot);
+        }
+
+        private static string FormatObjectPathLabel(string goPath)
+        {
+            if (string.IsNullOrEmpty(goPath))
+                return "<root>";
+
+            int lastSlash = goPath.LastIndexOf('/');
+            if (lastSlash < 0)
+                return goPath;
+
+            int prevSlash = goPath.LastIndexOf('/', lastSlash - 1);
+            if (prevSlash < 0)
+                return goPath;
+
+            return $"…/{goPath[(prevSlash + 1)..]}";
         }
 
         private void BindPropCell(VisualElement element, int index)
