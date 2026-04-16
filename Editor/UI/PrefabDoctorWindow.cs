@@ -839,6 +839,17 @@ namespace SashaRX.PrefabDoctor
         {
             if (_gameObjectListView == null) return;
 
+            // Preserve current hierarchy selection across filter changes
+            // by instance identity (InstanceID), not by list index.
+            int selectedInstanceId = 0;
+            if (_report != null && _report.IsHierarchyMode
+                && _selectedGoIndex >= 0 && _selectedGoIndex < _instanceRows.Count)
+            {
+                var selectedRoot = _instanceRows[_selectedGoIndex].root;
+                if (selectedRoot != null)
+                    selectedInstanceId = selectedRoot.GetInstanceID();
+            }
+
             // Hierarchy mode: show instance roots in the left panel.
             // Each row = one scene PrefabInstance root.
             if (_report != null && _report.IsHierarchyMode)
@@ -846,6 +857,13 @@ namespace SashaRX.PrefabDoctor
                 BuildPrefabGroups();
                 BuildInstanceRows();
                 _gameObjectListView.itemsSource = _instanceRows;
+
+                if (selectedInstanceId != 0)
+                {
+                    int restored = _instanceRows.FindIndex(r =>
+                        r.root != null && r.root.GetInstanceID() == selectedInstanceId);
+                    _selectedGoIndex = restored;
+                }
             }
             else
             {

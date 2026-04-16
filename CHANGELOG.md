@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.4] - 2026-04-16
+
+### Fixed
+- Hierarchy left-panel selection now survives filter changes by selected instance identity (InstanceID), preventing index-based row drift and mixed-looking right-panel context.
+
 ## [0.2.3] - 2026-04-16
 
 ### Fixed
