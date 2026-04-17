@@ -172,3 +172,135 @@
 .pd-btn-select-all-matching {
     color: rgb(140, 217, 255);
 }
+
+/* ── Pivot-by-depth right panel ─────────────────────────────── */
+.pd-pivot-scroll {
+    flex-grow: 1;
+}
+
+.pd-instance-block {
+    margin: 4px 6px;
+    padding: 4px;
+    border-width: 1px;
+    border-color: rgba(0, 0, 0, 0.35);
+    border-radius: 3px;
+    background-color: rgba(255, 255, 255, 0.02);
+    flex-direction: column;
+}
+
+.pd-instance-header {
+    flex-direction: row;
+    align-items: center;
+    padding: 2px 4px;
+    margin-bottom: 2px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.pd-instance-title {
+    -unity-font-style: bold;
+    color: rgb(220, 220, 220);
+    margin-right: 8px;
+}
+
+.pd-instance-summary {
+    color: rgb(150, 150, 150);
+    font-size: 10px;
+}
+
+.pd-pivot-grid {
+    flex-direction: column;
+}
+
+.pd-pivot-header-row {
+    flex-direction: row;
+    padding: 2px 0;
+    background-color: rgba(0, 0, 0, 0.15);
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.pd-pivot-head-label {
+    width: 280px;
+    -unity-font-style: bold;
+    padding-left: 4px;
+}
+
+.pd-pivot-head-cell {
+    width: 100px;
+    flex-direction: column;
+    align-items: center;
+    padding: 0 2px;
+}
+
+.pd-pivot-head-depth {
+    -unity-font-style: bold;
+    color: rgb(200, 200, 200);
+    font-size: 10px;
+}
+
+.pd-pivot-head-asset {
+    color: rgb(140, 140, 140);
+    font-size: 9px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pd-pivot-go-foldout {
+    margin-left: 2px;
+}
+
+.pd-pivot-go-foldout > .unity-foldout__toggle > .unity-toggle__text {
+    -unity-font-style: bold;
+    color: rgb(180, 200, 220);
+}
+
+.pd-pivot-row {
+    flex-direction: row;
+    padding: 1px 0;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(255, 255, 255, 0.04);
+}
+
+.pd-pivot-row-label {
+    width: 280px;
+    padding-left: 16px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pd-pivot-cell {
+    width: 100px;
+    padding: 0 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    -unity-text-align: middle-center;
+    font-size: 10px;
+}
+
+.pd-pivot-cell--has {
+    color: rgb(220, 220, 220);
+}
+
+.pd-pivot-cell--empty {
+    color: rgb(90, 90, 90);
+}
+
+.pd-pivot-row--pp .pd-pivot-row-label {
+    color: rgb(255, 120, 120);
+}
+
+.pd-pivot-row--multi .pd-pivot-row-label {
+    color: rgb(255, 200, 100);
+}
+
+.pd-pivot-row--orphan .pd-pivot-row-label {
+    color: rgb(160, 160, 160);
+}
+
+.pd-pivot-row--insig .pd-pivot-row-label {
+    color: rgb(140, 180, 220);
+}
