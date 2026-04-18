@@ -508,7 +508,16 @@ namespace SashaRX.PrefabDoctor
             {
                 _pivotViewEnabled = evt.newValue;
                 ApplyRightPanelViewMode();
-                RebuildPivotRightPanel();
+                if (_pivotViewEnabled)
+                {
+                    RebuildPivotRightPanel();
+                }
+                else
+                {
+                    // Flat-table path was short-circuited while pivot was on;
+                    // repopulate it now so the user sees actual rows.
+                    RebuildConflictList();
+                }
             });
             toolbar.Add(_pivotToggle);
 
@@ -1838,6 +1847,20 @@ namespace SashaRX.PrefabDoctor
         private void RebuildConflictList()
         {
             if (_conflictListView == null) return;
+
+            // Pivot mode owns the right panel; skip the entire flat-table
+            // rebuild (MCLV.Rebuild + full GoReport scan via LoadConflicts*)
+            // because the MCLV is hidden and nothing in the pivot path reads
+            // _conflictRows. Previously this ran on every left-panel click
+            // and produced 2–3s freezes on hierarchies with millions of
+            // conflicts. The view mode still needs to be applied so the
+            // hide/show state stays correct after external toggles.
+            if (_pivotViewEnabled)
+            {
+                ApplyRightPanelViewMode();
+                return;
+            }
+
             _conflictRows.Clear();
             _activeGroupForRightPanel = null;
 
