@@ -1863,6 +1863,7 @@ namespace SashaRX.PrefabDoctor
                     PushSelectionToListView();
                     UpdateBatchBar();
                     RefreshConflictHeader();
+                    ApplyRightPanelViewMode();
                     return;
                 }
 
@@ -1882,6 +1883,7 @@ namespace SashaRX.PrefabDoctor
                     PushSelectionToListView();
                     UpdateBatchBar();
                     RefreshConflictHeader();
+                    ApplyRightPanelViewMode();
                     return;
                 }
 
@@ -1913,6 +1915,7 @@ namespace SashaRX.PrefabDoctor
             PushSelectionToListView();
             UpdateBatchBar();
             RefreshConflictHeader();
+            ApplyRightPanelViewMode();
         }
 
         /// <summary>
@@ -1970,23 +1973,31 @@ namespace SashaRX.PrefabDoctor
 
             if (_report.IsHierarchyMode)
             {
-                if (IsGroupingByPrefabTypeActive()
-                    && _selectedGoIndex >= 0
-                    && _prefabGroups != null
-                    && _selectedGoIndex < _prefabGroups.Count)
+                // Left panel is instance-based even in Group Types mode,
+                // so we index _instanceRows and then look up the full
+                // prefab family via GetPrefabGroupForInstance (which reads
+                // the live _report.AssetToInstances map, not the rarely
+                // built _prefabGroups cache).
+                if (_selectedGoIndex < 0 || _selectedGoIndex >= _instanceRows.Count)
+                    return result;
+
+                var (selectedRoot, _) = _instanceRows[_selectedGoIndex];
+                if (selectedRoot == null) return result;
+
+                if (IsGroupingByPrefabTypeActive())
                 {
-                    var group = _prefabGroups[_selectedGoIndex];
+                    var group = GetPrefabGroupForInstance(selectedRoot);
                     if (group?.Instances != null)
+                    {
                         foreach (var inst in group.Instances)
                             if (inst != null) result.Add(inst);
-                    return result;
+                        return result;
+                    }
+                    // Fallback: if we couldn't resolve the group, at least
+                    // show the selected instance so the panel isn't empty.
                 }
 
-                if (_selectedGoIndex >= 0 && _selectedGoIndex < _instanceRows.Count)
-                {
-                    var (root, _) = _instanceRows[_selectedGoIndex];
-                    if (root != null) result.Add(root);
-                }
+                result.Add(selectedRoot);
                 return result;
             }
 
