@@ -315,8 +315,25 @@ namespace SashaRX.PrefabDoctor
                         var mods = PrefabUtility.GetPropertyModifications(level.Root);
                         if (mods != null)
                         {
+                            // For deeply nested PrefabInstance roots Unity can
+                            // return modifications from the OUTER wrapper
+                            // (e.g. Level.prefab) whose targets live in
+                            // unrelated sibling subtrees. Scope each mod to
+                            // level.Root's own subtree so foreign overrides
+                            // are not attributed to this instance.
+                            var levelT = level.Root.transform;
                             for (int m = 0; m < mods.Length; m++)
-                                ProcessModFast(mods[m], level, tempMap);
+                            {
+                                var mod = mods[m];
+                                if (mod.target != null)
+                                {
+                                    var targetGo = GetGameObject(mod.target);
+                                    if (targetGo != null
+                                        && !targetGo.transform.IsChildOf(levelT))
+                                        continue;
+                                }
+                                ProcessModFast(mod, level, tempMap);
+                            }
                         }
 
                         cached = new List<(PropertyKey, OverrideEntry)>();
