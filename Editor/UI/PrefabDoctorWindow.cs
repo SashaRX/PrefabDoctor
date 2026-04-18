@@ -527,6 +527,15 @@ namespace SashaRX.PrefabDoctor
             pingToggle.RegisterValueChangedCallback(evt => _autoPing = evt.newValue);
             toolbar.Add(pingToggle);
 
+            var dumpButton = new ToolbarButton(DumpInstanceAttribution)
+            { text = "Dump Instance" };
+            dumpButton.tooltip = "Diagnostic: print attribution info for the "
+                + "currently selected left-panel instance to the Console. "
+                + "Shows which GameObjectReports the analyzer attributes to "
+                + "it, whether their RelativePath actually lives under the "
+                + "instance's scene path, and the first few overrides.";
+            toolbar.Add(dumpButton);
+
             _cleanOrphansButton = new ToolbarButton(OnCleanOrphansClicked)
             { text = "Clean Orphans" };
             toolbar.Add(_cleanOrphansButton);
@@ -2050,6 +2059,106 @@ namespace SashaRX.PrefabDoctor
         {
             if (_target == null) return;
             RunUnifiedAnalysis();
+        }
+
+        /// <summary>
+        /// Diagnostic: dump attribution info for the currently selected
+        /// left-panel instance. Prints, for the chosen scene PrefabInstance:
+        /// its own scene path, how many <see cref="GameObjectReport"/>s the
+        /// analyzer attributes to it (via InstanceRoot and via the
+        /// InstanceScopedPathKey prefix fallback), and for the first 20 —
+        /// whether their <see cref="GameObjectReport.RelativePath"/> actually
+        /// starts with the instance's own scene path. Mismatches mean the
+        /// analyzer is attributing foreign conflicts to this instance.
+        /// </summary>
+        private void DumpInstanceAttribution()
+        {
+            if (_report == null)
+            {
+                Debug.Log("[Prefab Doctor] Dump: no report — run Analyze first.");
+                return;
+            }
+            if (!_report.IsHierarchyMode)
+            {
+                Debug.Log("[Prefab Doctor] Dump: instance-mode report — "
+                    + "hierarchy attribution only applies to hierarchy analysis.");
+                return;
+            }
+            if (_selectedGoIndex < 0 || _selectedGoIndex >= _instanceRows.Count)
+            {
+                Debug.Log("[Prefab Doctor] Dump: select an instance on the left first.");
+                return;
+            }
+
+            var (instanceRoot, reportedCount) = _instanceRows[_selectedGoIndex];
+            if (instanceRoot == null)
+            {
+                Debug.Log("[Prefab Doctor] Dump: selected instance root is null.");
+                return;
+            }
+
+            int selectedId = instanceRoot.GetInstanceID();
+            string scenePath = GetHierarchyPath(instanceRoot) ?? instanceRoot.name;
+
+            int matchesByField = 0;
+            int matchesByKey = 0;
+            int matchesBoth = 0;
+            int mismatchBetweenFieldAndKey = 0;
+
+            var samples = new List<(string relPath, string via, bool startsWithScenePath)>();
+
+            foreach (var goReport in _report.GameObjects)
+            {
+                bool byField = goReport.InstanceRoot != null
+                    && goReport.InstanceRoot.GetInstanceID() == selectedId;
+
+                bool byKey = TryGetInstanceIdFromScopedKey(
+                    goReport.InstanceScopedPathKey, out int keyId) && keyId == selectedId;
+
+                if (byField) matchesByField++;
+                if (byKey) matchesByKey++;
+                if (byField && byKey) matchesBoth++;
+                if (byField != byKey) mismatchBetweenFieldAndKey++;
+
+                if ((byField || byKey) && samples.Count < 20)
+                {
+                    string via = byField && byKey ? "field+key"
+                        : byField ? "field-only"
+                        : "key-only";
+                    bool under = !string.IsNullOrEmpty(goReport.RelativePath)
+                        && goReport.RelativePath.StartsWith(scenePath,
+                            StringComparison.Ordinal);
+                    samples.Add((goReport.RelativePath, via, under));
+                }
+            }
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[Prefab Doctor] Dump for instance '").Append(instanceRoot.name)
+              .Append("' (InstanceID=").Append(selectedId).Append(")\n");
+            sb.Append("  scene path: ").Append(scenePath).Append('\n');
+            sb.Append("  left-panel reported count: ").Append(reportedCount).Append('\n');
+            sb.Append("  goReports matched by InstanceRoot field: ")
+              .Append(matchesByField).Append('\n');
+            sb.Append("  goReports matched by InstanceScopedPathKey prefix: ")
+              .Append(matchesByKey).Append('\n');
+            sb.Append("  matched by BOTH:   ").Append(matchesBoth).Append('\n');
+            sb.Append("  mismatch (field xor key): ")
+              .Append(mismatchBetweenFieldAndKey).Append('\n');
+            sb.Append("  first ").Append(samples.Count)
+              .Append(" samples (✓ = RelativePath starts with instance scene path):\n");
+
+            int underCount = 0;
+            foreach (var (rel, via, under) in samples)
+            {
+                if (under) underCount++;
+                sb.Append("    ").Append(under ? "✓ " : "✗ ")
+                  .Append('[').Append(via).Append("]  ")
+                  .Append(string.IsNullOrEmpty(rel) ? "(null)" : rel).Append('\n');
+            }
+            sb.Append("  samples under instance path: ").Append(underCount)
+              .Append(" / ").Append(samples.Count);
+
+            Debug.Log(sb.ToString());
         }
 
         private void LoadInstancesForGroup(PrefabTypeGroup group)
