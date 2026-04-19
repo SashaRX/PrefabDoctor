@@ -2137,6 +2137,29 @@ namespace SashaRX.PrefabDoctor
               .Append("' (InstanceID=").Append(selectedId).Append(")\n");
             sb.Append("  scene path: ").Append(scenePath).Append('\n');
             sb.Append("  left-panel reported count: ").Append(reportedCount).Append('\n');
+
+            // Chain dump — reveals what BuildChain resolves for depth 1+.
+            // If a nested scene instance's depth 1 points at the OUTER
+            // containing prefab asset's root (e.g. Level) instead of its own
+            // base (e.g. AirCon.prefab), GetPropertyModifications at depth 1
+            // returns the outer wrapper's full mod list and foreign overrides
+            // get attributed here.
+            var analyzer = new OverrideAnalyzer();
+            var chain = analyzer.BuildChain(instanceRoot);
+            sb.Append("  BuildChain levels (").Append(chain.Count).Append("):\n");
+            for (int c = 0; c < chain.Count; c++)
+            {
+                var lvl = chain[c];
+                string rootName = lvl.Root != null ? lvl.Root.name : "(null)";
+                string rootTopName = lvl.Root != null && lvl.Root.transform != null
+                    ? lvl.Root.transform.root.name
+                    : "(null)";
+                sb.Append("    D").Append(lvl.Depth).Append(" scene=")
+                  .Append(lvl.IsSceneInstance).Append(" Root='").Append(rootName)
+                  .Append("' transform.root='").Append(rootTopName)
+                  .Append("' asset='").Append(lvl.AssetPath ?? "").Append("'\n");
+            }
+
             sb.Append("  goReports matched by InstanceRoot field: ")
               .Append(matchesByField).Append('\n');
             sb.Append("  goReports matched by InstanceScopedPathKey prefix: ")
