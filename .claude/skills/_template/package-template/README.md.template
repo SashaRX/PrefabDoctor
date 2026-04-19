@@ -1,0 +1,5 @@
+# {{Display Name}}
+
+## Установка
+
+Window → Package Manager → + → Add from git URL → `https://github.com/{{author}}/{{repo}}.git`
