@@ -1,0 +1,7 @@
+{
+  "name": "{{Company}}.{{PackageName}}.Tests.Editor",
+  "references": ["{{Company}}.{{PackageName}}.Editor"],
+  "includePlatforms": ["Editor"],
+  "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+  "autoReferenced": false
+}

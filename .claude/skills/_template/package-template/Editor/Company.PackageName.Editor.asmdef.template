@@ -1,0 +1,8 @@
+{
+  "name": "{{Company}}.{{PackageName}}.Editor",
+  "rootNamespace": "{{Company}}.{{PackageName}}",
+  "references": [],
+  "includePlatforms": ["Editor"],
+  "allowUnsafeCode": false,
+  "autoReferenced": true
+}
