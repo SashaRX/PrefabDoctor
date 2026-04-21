@@ -139,6 +139,13 @@ namespace SashaRX.PrefabDoctor
         private Label _batchCountLabel;
         private MultiColumnListView _conflictListView;
 
+        // Pivot-by-depth right panel (stage 2: wires InstanceBlockView into
+        // the window). When _pivotViewEnabled is true, _pivotScrollView is
+        // shown and the flat MCLV + instance list are hidden.
+        private ScrollView _pivotScrollView;
+        private ToolbarToggle _pivotToggle;
+        private bool _pivotViewEnabled = true;
+
         // Instance list (hierarchy mode: shown instead of conflict list
         // when a prefab type group is selected on the left)
         private ListView _instanceListView;
@@ -451,6 +458,7 @@ namespace SashaRX.PrefabDoctor
                         _selectedConflicts.Clear();
                         RefreshLeftPanel();
                         RebuildConflictList();
+                        RebuildPivotRightPanel();
                     },
                     _ => _filterMode == captured
                         ? DropdownMenuAction.Status.Checked
@@ -488,8 +496,30 @@ namespace SashaRX.PrefabDoctor
                 _selectedConflicts.Clear();
                 RefreshLeftPanel();
                 RebuildConflictList();
+                RebuildPivotRightPanel();
             });
             toolbar.Add(_groupByTypeToggle);
+
+            _pivotToggle = new ToolbarToggle { text = "Pivot", value = _pivotViewEnabled };
+            _pivotToggle.tooltip = "Right panel: group overrides per instance as "
+                + "GameObject → property rows with nesting-depth columns "
+                + "(empty depths hidden). Disable to fall back to the flat table.";
+            _pivotToggle.RegisterValueChangedCallback(evt =>
+            {
+                _pivotViewEnabled = evt.newValue;
+                ApplyRightPanelViewMode();
+                if (_pivotViewEnabled)
+                {
+                    RebuildPivotRightPanel();
+                }
+                else
+                {
+                    // Flat-table path was short-circuited while pivot was on;
+                    // repopulate it now so the user sees actual rows.
+                    RebuildConflictList();
+                }
+            });
+            toolbar.Add(_pivotToggle);
 
             var pingToggle = new ToolbarToggle { text = "Ping", value = _autoPing };
             pingToggle.tooltip = "Auto-ping scene object on left-panel click. "
@@ -836,6 +866,7 @@ namespace SashaRX.PrefabDoctor
             if (idx == _selectedGoIndex) return;
             _selectedGoIndex = idx;
             RebuildConflictList();
+            RebuildPivotRightPanel();
 
             if (!_autoPing || idx < 0) return;
 
@@ -1147,6 +1178,14 @@ namespace SashaRX.PrefabDoctor
 
             _batchBar = BuildBatchBar();
             panel.Add(_batchBar);
+
+            _pivotScrollView = new ScrollView(ScrollViewMode.Vertical)
+            {
+                viewDataKey = "prefab-doctor-pivot-scroll"
+            };
+            _pivotScrollView.AddToClassList("pd-pivot-scroll");
+            _pivotScrollView.style.flexGrow = 1;
+            panel.Add(_pivotScrollView);
 
             var columns = new Columns();
 
@@ -1808,6 +1847,20 @@ namespace SashaRX.PrefabDoctor
         private void RebuildConflictList()
         {
             if (_conflictListView == null) return;
+
+            // Pivot mode owns the right panel; skip the entire flat-table
+            // rebuild (MCLV.Rebuild + full GoReport scan via LoadConflicts*)
+            // because the MCLV is hidden and nothing in the pivot path reads
+            // _conflictRows. Previously this ran on every left-panel click
+            // and produced 2–3s freezes on hierarchies with millions of
+            // conflicts. The view mode still needs to be applied so the
+            // hide/show state stays correct after external toggles.
+            if (_pivotViewEnabled)
+            {
+                ApplyRightPanelViewMode();
+                return;
+            }
+
             _conflictRows.Clear();
             _activeGroupForRightPanel = null;
 
@@ -1833,6 +1886,7 @@ namespace SashaRX.PrefabDoctor
                     PushSelectionToListView();
                     UpdateBatchBar();
                     RefreshConflictHeader();
+                    ApplyRightPanelViewMode();
                     return;
                 }
 
@@ -1852,6 +1906,7 @@ namespace SashaRX.PrefabDoctor
                     PushSelectionToListView();
                     UpdateBatchBar();
                     RefreshConflictHeader();
+                    ApplyRightPanelViewMode();
                     return;
                 }
 
@@ -1883,6 +1938,118 @@ namespace SashaRX.PrefabDoctor
             PushSelectionToListView();
             UpdateBatchBar();
             RefreshConflictHeader();
+            ApplyRightPanelViewMode();
+        }
+
+        /// <summary>
+        /// Stage 2 hook: build one <see cref="InstanceBlockView"/> per selected
+        /// scene instance and stack them in <see cref="_pivotScrollView"/>.
+        /// Called from <see cref="RefreshAfterReportChange"/> so the pivot
+        /// panel always reflects the current report + filter. No-ops when the
+        /// pivot toggle is off or the scroll view is not built yet.
+        /// </summary>
+        private void RebuildPivotRightPanel()
+        {
+            if (_pivotScrollView == null) return;
+            _pivotScrollView.Clear();
+            if (!_pivotViewEnabled || _report == null) return;
+
+            var roots = ResolvePivotInstanceRoots();
+            if (roots.Count == 0) return;
+
+            int rendered = 0;
+            // Safety cap so a careless "Group Types" selection of a giant
+            // prefab family doesn't try to build hundreds of blocks at once.
+            const int maxBlocks = 32;
+
+            foreach (var root in roots)
+            {
+                if (root == null) continue;
+                var block = PivotBuilder.Build(_report, root, PassesFilter);
+                if (block == null) continue;
+
+                _pivotScrollView.Add(new InstanceBlockView(block, OnPivotActionApplied));
+                rendered++;
+                if (rendered >= maxBlocks) break;
+            }
+
+            if (rendered == 0)
+            {
+                var empty = new Label("No overrides match the current filter.");
+                empty.style.color = new Color(0.6f, 0.6f, 0.6f);
+                empty.style.paddingLeft = 8;
+                empty.style.paddingTop = 8;
+                _pivotScrollView.Add(empty);
+            }
+        }
+
+        /// <summary>
+        /// Decide which scene instance roots the pivot panel should render
+        /// blocks for. Mirrors the left-panel selection today (single-select
+        /// ListView); a later pass will replace this with a multi-select
+        /// TreeView and return the full selection set.
+        /// </summary>
+        private List<GameObject> ResolvePivotInstanceRoots()
+        {
+            var result = new List<GameObject>();
+            if (_report == null) return result;
+
+            if (_report.IsHierarchyMode)
+            {
+                // Left panel is instance-based even in Group Types mode,
+                // so we index _instanceRows and then look up the full
+                // prefab family via GetPrefabGroupForInstance (which reads
+                // the live _report.AssetToInstances map, not the rarely
+                // built _prefabGroups cache).
+                if (_selectedGoIndex < 0 || _selectedGoIndex >= _instanceRows.Count)
+                    return result;
+
+                var (selectedRoot, _) = _instanceRows[_selectedGoIndex];
+                if (selectedRoot == null) return result;
+
+                if (IsGroupingByPrefabTypeActive())
+                {
+                    var group = GetPrefabGroupForInstance(selectedRoot);
+                    if (group?.Instances != null)
+                    {
+                        foreach (var inst in group.Instances)
+                            if (inst != null) result.Add(inst);
+                        return result;
+                    }
+                    // Fallback: if we couldn't resolve the group, at least
+                    // show the selected instance so the panel isn't empty.
+                }
+
+                result.Add(selectedRoot);
+                return result;
+            }
+
+            // Instance-mode: the analyzed root acts as the sole "instance".
+            if (_report.AnalyzedRoot != null) result.Add(_report.AnalyzedRoot);
+            return result;
+        }
+
+        /// <summary>Toggle visibility of flat MCLV vs pivot scroll view.</summary>
+        private void ApplyRightPanelViewMode()
+        {
+            bool pivot = _pivotViewEnabled;
+            if (_pivotScrollView != null)
+                _pivotScrollView.style.display = pivot ? DisplayStyle.Flex : DisplayStyle.None;
+            if (_conflictListView != null)
+                _conflictListView.style.display = pivot ? DisplayStyle.None : DisplayStyle.Flex;
+            if (_instanceListView != null && pivot)
+                _instanceListView.style.display = DisplayStyle.None;
+        }
+
+        /// <summary>
+        /// Callback handed to every <see cref="InstanceBlockView"/>: any
+        /// cell-/row-/block-level action mutates PropertyModifications, so
+        /// re-run the hierarchy analysis to refresh both panels consistently.
+        /// </summary>
+        private void OnPivotActionApplied()
+        {
+            if (_target == null) return;
+            RunUnifiedAnalysis();
         }
 
         private void LoadInstancesForGroup(PrefabTypeGroup group)
@@ -2389,6 +2556,8 @@ namespace SashaRX.PrefabDoctor
             RefreshStatusBar();
             RefreshLeftPanel();
             RebuildConflictList();
+            RebuildPivotRightPanel();
+            ApplyRightPanelViewMode();
             RefreshEmptyState();
         }
 
