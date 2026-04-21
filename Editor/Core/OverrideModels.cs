@@ -207,4 +207,44 @@ namespace SashaRX.PrefabDoctor
         public int OrphanCount;
         public int InsignificantCount;
     }
+
+    // ── Pivot-by-depth view ────────────────────────────────────────
+    //
+    // One InstancePivotBlock = what the UI renders as a single block
+    // for one selected prefab instance in the right panel. Built by
+    // PivotBuilder.Build from an AnalysisReport + instanceRoot. The
+    // block re-groups every PropertyConflict belonging to the instance
+    // into (GameObject → property) form, with depth as columns. Only
+    // depths that actually carry an override somewhere in the block
+    // are surfaced in VisibleDepths — empty depth columns are hidden
+    // entirely by the view layer.
+
+    /// <summary>One block in the pivot view — everything for a single instance.</summary>
+    internal class InstancePivotBlock
+    {
+        public GameObject InstanceRoot;
+        public string InstanceName;
+        public List<NestingLevel> Chain = new();
+        /// <summary>Depths that have at least one override somewhere in the block (asc).</summary>
+        public List<int> VisibleDepths = new();
+        public List<GoPropertyGroup> GoGroups = new();
+    }
+
+    /// <summary>Properties of one GameObject inside an <see cref="InstancePivotBlock"/>.</summary>
+    internal class GoPropertyGroup
+    {
+        public string GoPath;
+        public string GoDisplayName;
+        public GameObject Go;
+        public GameObjectReport GoReport;
+        public List<PropertyRow> Properties = new();
+    }
+
+    /// <summary>One property row in the pivot: value by depth.</summary>
+    internal class PropertyRow
+    {
+        public PropertyConflict Conflict;
+        /// <summary>depth → entry. Missing key means no override at this depth.</summary>
+        public Dictionary<int, OverrideEntry> ByDepth = new();
+    }
 }

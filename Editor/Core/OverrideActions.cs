@@ -312,6 +312,32 @@ namespace SashaRX.PrefabDoctor
             BatchRevert(conflicts.Select(c => (root, c)));
         }
 
+        /// <summary>
+        /// Cell-level action for the pivot view: revert the override for a
+        /// single property at a single depth, leaving the other depths of
+        /// that same property untouched. Useful when you want to drop a
+        /// redundant depth-N override but keep the instance-level one.
+        /// </summary>
+        public static void RevertDepth(
+            GameObject instanceRoot, PropertyConflict conflict, int depth)
+        {
+            if (instanceRoot == null || conflict == null) return;
+
+            Undo.SetCurrentGroupName($"Prefab Doctor: Revert at depth {depth}");
+            int group = Undo.GetCurrentGroup();
+            try
+            {
+                var chain = new OverrideAnalyzer().BuildChain(instanceRoot);
+                var level = chain.FirstOrDefault(l => l.Depth == depth);
+                if (level.Root == null) return;
+                RemoveModification(level.Root, conflict.Key);
+            }
+            finally
+            {
+                Undo.CollapseUndoOperations(group);
+            }
+        }
+
         // ── Internal helpers ───────────────────────────────────────
 
         /// <summary>
