@@ -26,12 +26,18 @@ namespace SashaRX.PrefabDoctor
             passesFilter ??= static _ => true;
 
             int selectedInstanceId = instanceRoot.GetInstanceID();
+            // Non-hierarchy reports don't populate InstanceRoot / scoped keys
+            // per GO — every GameObjectReport implicitly belongs to the single
+            // analyzed root. Short-circuit the attribution check so the pivot
+            // view is usable in instance mode too.
+            bool includeAll = !report.IsHierarchyMode;
             var visibleDepths = new HashSet<int>();
             var goGroups = new List<GoPropertyGroup>();
 
             foreach (var goReport in report.GameObjects)
             {
-                if (!BelongsToInstance(goReport, selectedInstanceId)) continue;
+                if (!includeAll
+                    && !BelongsToInstance(goReport, selectedInstanceId)) continue;
 
                 GoPropertyGroup bucket = null;
 
@@ -72,11 +78,21 @@ namespace SashaRX.PrefabDoctor
             var sortedDepths = new List<int>(visibleDepths);
             sortedDepths.Sort();
 
+            // In hierarchy mode report.Chain is built from the OUTER analyzed
+            // root (e.g. Level), but each instance has its own variant chain.
+            // Rebuild it per instance so depth column headers and cell-level
+            // "Ping source prefab" actions point at the correct asset. For
+            // instance-mode analyses report.Chain already describes the
+            // selected root — reuse it to save a BuildChain call.
+            List<NestingLevel> chain = report.IsHierarchyMode
+                ? new OverrideAnalyzer().BuildChain(instanceRoot)
+                : report.Chain;
+
             return new InstancePivotBlock
             {
                 InstanceRoot = instanceRoot,
                 InstanceName = instanceRoot.name,
-                Chain = report.Chain,
+                Chain = chain,
                 VisibleDepths = sortedDepths,
                 GoGroups = goGroups,
             };
