@@ -184,30 +184,92 @@ namespace SashaRX.PrefabDoctor
         public List<NestingLevel> BuildChain(GameObject root)
         {
             var chain = new List<NestingLevel>();
-            var current = root;
-            int depth = 0;
+            if (root == null) return chain;
+
             var visited = new HashSet<int>();
 
+            // ── Depth 0: the thing we were handed (scene instance or asset) ──
+            string d0Path = AssetDatabase.GetAssetPath(root);
+            bool d0IsScene = string.IsNullOrEmpty(d0Path)
+                || d0Path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase);
+
+            chain.Add(new NestingLevel
+            {
+                Depth = 0,
+                Root = root,
+                AssetPath = d0Path,
+                IsSceneInstance = d0IsScene
+            });
+            visited.Add(root.GetInstanceID());
+
+            // ── Depth 1: the instance's OWN prefab asset (not the containing wrapper) ──
+            //
+            // For a scene PrefabInstance that is NESTED inside a larger prefab
+            // (e.g. AirCon scene instance living under Level.prefab ->
+            // Block_01.prefab -> Market.prefab -> Crate_AirCon_Big_01.prefab),
+            // PrefabUtility.GetCorrespondingObjectFromSource walks OUTWARD
+            // through each containing prefab — it returns the AirCon object
+            // sitting inside Level.prefab, then inside Block_01.prefab, etc.
+            // GetPropertyModifications on those container-view roots pulls the
+            // WHOLE outer wrapper's mod list (including overrides on unrelated
+            // sibling subtrees), which is where foreign attributions come from.
+            //
+            // Jump straight to the instance's OWN base asset instead — that is,
+            // the prefab that the user actually instantiated — and then let the
+            // variant walk below follow any variant chain that asset has.
+            GameObject d1 = null;
+            string d1Path = null;
+            if (d0IsScene || (!string.IsNullOrEmpty(d0Path)
+                && !d0Path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)))
+            {
+                d1Path = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(root);
+                if (!string.IsNullOrEmpty(d1Path))
+                {
+                    d1 = AssetDatabase.LoadAssetAtPath<GameObject>(d1Path);
+                    if (d1 != null && d1 != root
+                        && visited.Add(d1.GetInstanceID()))
+                    {
+                        chain.Add(new NestingLevel
+                        {
+                            Depth = 1,
+                            Root = d1,
+                            AssetPath = d1Path,
+                            IsSceneInstance = false
+                        });
+                    }
+                    else
+                    {
+                        d1 = null; // don't continue variant walk from bogus D1
+                    }
+                }
+            }
+
+            // ── Depth 2+: variant chain only ──
+            //
+            // GetCorrespondingObjectFromSource on an asset root returns the
+            // variant's base. Accept it only if it is itself a root of its own
+            // asset — otherwise we are sliding back into container nesting and
+            // should stop.
+            var current = d1;
+            int depth = 2;
             while (current != null)
             {
-                int id = current.GetInstanceID();
-                if (visited.Contains(id)) break;
-                visited.Add(id);
+                var source = PrefabUtility.GetCorrespondingObjectFromSource(current);
+                if (source == null || source == current) break;
+                if (!visited.Add(source.GetInstanceID())) break;
 
-                string path = AssetDatabase.GetAssetPath(current);
-                bool isScene = string.IsNullOrEmpty(path) ||
-                               path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase);
+                if (source.transform != source.transform.root)
+                    break; // container step, not a real variant parent
 
+                string path = AssetDatabase.GetAssetPath(source);
                 chain.Add(new NestingLevel
                 {
                     Depth = depth,
-                    Root = current,
+                    Root = source,
                     AssetPath = path,
-                    IsSceneInstance = isScene
+                    IsSceneInstance = false
                 });
 
-                var source = PrefabUtility.GetCorrespondingObjectFromSource(current);
-                if (source == null || source == current) break;
                 current = source;
                 depth++;
             }
@@ -227,9 +289,12 @@ namespace SashaRX.PrefabDoctor
             GameObject instanceRoot,
             Dictionary<string, List<NestingLevel>> templateCache)
         {
-            // Get the immediate source prefab for the cache key.
-            var source = PrefabUtility.GetCorrespondingObjectFromSource(instanceRoot);
-            string cacheKey = source != null ? AssetDatabase.GetAssetPath(source) : null;
+            // Cache key = the instance's OWN prefab asset path, not whatever
+            // GetCorrespondingObjectFromSource happens to hand back (which for
+            // deeply nested scene instances is a container-view wrapper such
+            // as Level.prefab, shared across unrelated inner prefab types).
+            string cacheKey = PrefabUtility
+                .GetPrefabAssetPathOfNearestInstanceRoot(instanceRoot);
 
             if (!string.IsNullOrEmpty(cacheKey)
                 && templateCache.TryGetValue(cacheKey, out var template))
@@ -315,8 +380,25 @@ namespace SashaRX.PrefabDoctor
                         var mods = PrefabUtility.GetPropertyModifications(level.Root);
                         if (mods != null)
                         {
+                            // For deeply nested PrefabInstance roots Unity can
+                            // return modifications from the OUTER wrapper
+                            // (e.g. Level.prefab) whose targets live in
+                            // unrelated sibling subtrees. Scope each mod to
+                            // level.Root's own subtree so foreign overrides
+                            // are not attributed to this instance.
+                            var levelT = level.Root.transform;
                             for (int m = 0; m < mods.Length; m++)
-                                ProcessModFast(mods[m], level, tempMap);
+                            {
+                                var mod = mods[m];
+                                if (mod.target != null)
+                                {
+                                    var targetGo = GetGameObject(mod.target);
+                                    if (targetGo != null
+                                        && !targetGo.transform.IsChildOf(levelT))
+                                        continue;
+                                }
+                                ProcessModFast(mod, level, tempMap);
+                            }
                         }
 
                         cached = new List<(PropertyKey, OverrideEntry)>();
@@ -351,8 +433,81 @@ namespace SashaRX.PrefabDoctor
                     var mods = PrefabUtility.GetPropertyModifications(level.Root);
                     if (mods == null) continue;
 
+                    // For a nested scene PrefabInstance root Unity returns the
+                    // OUTER wrapper's full mod list (e.g. Level's mods on
+                    // Spline, Door_01, siblings' AirCon_01_LODs). We narrow
+                    // those down by asking where this instance LIVES inside
+                    // the outer prefab and keeping only mods whose target sits
+                    // under that subtree. For a top-level scene PrefabInstance
+                    // (direct instance of a prefab) the correspondence is the
+                    // prefab asset root itself, so every mod.target passes —
+                    // no loss of data.
+                    var outerContainerView = PrefabUtility
+                        .GetCorrespondingObjectFromSource(level.Root);
+                    Transform containerT = outerContainerView != null
+                        ? outerContainerView.transform
+                        : null;
+
+                    // Pre-compute the container-view's own GetRelativePath so
+                    // each kept mod's target path can be re-rooted to this
+                    // instance's scope. Without this, target.GetRelativePath
+                    // returns the full outer-asset path (e.g. "Level/Block_01/
+                    // SovietBuilding_01/AirCon/AirCon_01_M/AirCon_01_LOD0") and
+                    // later gets concatenated with the scene hierPath,
+                    // producing doubled garbage like "Block_01/.../AirCon_01_M/
+                    // Level/Block_01/.../AirCon_01_M/AirCon_01_LOD0".
+                    string containerPrefix = null;
+                    if (containerT != null)
+                    {
+                        string containerPath = GetRelativePath(outerContainerView);
+                        if (!string.IsNullOrEmpty(containerPath))
+                            containerPrefix = containerPath + "/";
+                    }
+
                     for (int m = 0; m < mods.Length; m++)
-                        ProcessModFast(mods[m], level, map);
+                    {
+                        var mod = mods[m];
+                        if (containerT != null)
+                        {
+                            // Orphan mods (mod.target == null) live on the
+                            // outer wrapper's PrefabInstance, not on any
+                            // specific nested root.
+                            if (mod.target == null) continue;
+
+                            var targetGo = GetGameObject(mod.target);
+                            if (targetGo == null) continue;
+                            if (!targetGo.transform.IsChildOf(containerT))
+                                continue;
+
+                            // Attribute each mod to the NEAREST PrefabInstance
+                            // root that contains its target. If any transform
+                            // strictly between the target and our containerT
+                            // is itself a PrefabInstance root, this mod
+                            // belongs to THAT nested instance and will be
+                            // collected when it is analyzed. Without this
+                            // check, Block_01's wrapper mods on e.g.
+                            // Crate_FireCabinet_01/NetworkObject.SceneId get
+                            // counted once on Block_01 and again on the
+                            // nested Crate_FireCabinet_01 instance.
+                            bool ownedByNested = false;
+                            var walk = targetGo.transform;
+                            while (walk != null && walk != containerT)
+                            {
+                                if (PrefabUtility.IsAnyPrefabInstanceRoot(walk.gameObject))
+                                {
+                                    ownedByNested = true;
+                                    break;
+                                }
+                                walk = walk.parent;
+                            }
+                            if (ownedByNested) continue;
+                        }
+
+                        if (containerPrefix != null)
+                            ProcessModFastWithPathStrip(mod, level, map, containerPrefix);
+                        else
+                            ProcessModFast(mod, level, map);
+                    }
                 }
             }
         }
@@ -415,6 +570,71 @@ namespace SashaRX.PrefabDoctor
                 GameObjectPath = keyBase.goPath,
                 PropertyPath = mod.propertyPath,
                 TargetInstanceId = keyBase.targetId
+            };
+            AddToMap(map, key, level, mod);
+        }
+
+        /// <summary>
+        /// Variant of <see cref="ProcessModFast"/> that strips the container-
+        /// view path prefix from the target's computed GetRelativePath before
+        /// caching, so a nested scene PrefabInstance's mods are keyed by a
+        /// path relative to the instance's own subtree rather than the full
+        /// outer-asset path. Used only from the D0 scope-filtered branch in
+        /// <see cref="CollectOverridesFast"/> where
+        /// <c>containerPrefix</c> is the non-empty path (with trailing '/')
+        /// of the corresponding object inside the outer prefab wrapper.
+        ///
+        /// Bypasses <see cref="_keyBaseCache"/>: the same target referenced
+        /// from two different instance contexts must produce two different
+        /// scoped paths, so a cache keyed only by targetId would be wrong.
+        /// </summary>
+        private void ProcessModFastWithPathStrip(
+            PropertyModification mod, NestingLevel level,
+            Dictionary<PropertyKey, List<OverrideEntry>> map,
+            string containerPrefix)
+        {
+            if (!IncludeDefaultOverrides && PrefabUtility.IsDefaultOverride(mod))
+                return;
+
+            if (mod.target == null)
+            {
+                var orphanKey = new PropertyKey
+                {
+                    ComponentType = "MISSING",
+                    GameObjectPath = "(orphaned)",
+                    PropertyPath = mod.propertyPath,
+                    TargetInstanceId = 0
+                };
+                AddToMap(map, orphanKey, level, mod);
+                return;
+            }
+
+            if (!IncludeInternalProperties && IsInternalProperty(mod.propertyPath))
+                return;
+
+            string typeName = mod.target.GetType().Name;
+            if (IsIgnoredComponentType(typeName)) return;
+
+            string fullPath = GetRelativePath(mod.target);
+            string goPath = fullPath;
+            if (fullPath != null && fullPath.StartsWith(containerPrefix,
+                StringComparison.Ordinal))
+            {
+                goPath = fullPath.Substring(containerPrefix.Length);
+            }
+            else if (fullPath != null && fullPath.Length + 1 == containerPrefix.Length
+                && containerPrefix.StartsWith(fullPath, StringComparison.Ordinal))
+            {
+                // Target IS the container view itself — empty sub-path.
+                goPath = string.Empty;
+            }
+
+            var key = new PropertyKey
+            {
+                ComponentType = typeName,
+                GameObjectPath = goPath,
+                PropertyPath = mod.propertyPath,
+                TargetInstanceId = mod.target.GetInstanceID()
             };
             AddToMap(map, key, level, mod);
         }
